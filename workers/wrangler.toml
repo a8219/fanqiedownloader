@@ -1,0 +1,27 @@
+name = "fanqie-downloader"
+main = "worker.js"
+compatibility_date = "2026-10-24"
+compatibility_flags = ["nodejs_compat"]
+
+# ========== 方案 B：Durable Objects（秒级，推荐） ==========
+[[durable_objects.bindings]]
+name = "FANQIE_DO"
+class_name = "FanqieJob"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FanqieJob"]
+
+# ========== 方案 A：KV + Cron（分钟级，兜底） ==========
+# 如不需要可整段注释；需要时执行:
+#   npx wrangler kv namespace create FANQIE_KV
+[[kv_namespaces]]
+binding = "FANQIE_KV"
+id = "<your-kv-id>"
+
+[triggers]
+crons = ["* * * * *"]
+
+# 可选：默认代理
+# [vars]
+# FANQIE_PROXY_API = "https://your-proxy.example.com/api"
