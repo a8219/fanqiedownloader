@@ -491,3 +491,57 @@ curl "https://fanqie-downloader.<sub>.workers.dev/tg/setup"
 | `/api/detail book_id=不存在` | `502` 上游 404 透传 |
 | TG webhook | `Webhook was set`，`last_error: (无)` |
 | DO 命名空间 | `FanqieJob / cd1fe7ef962a4592a4008de77ddfe4dc` |
+
+## 21. 完整正文（APP 端接口）
+
+### 21.1 问题
+
+网页版 `/reader/{item_id}` 对 VIP 章节只返回约 160 字符试读片段，`__INITIAL_STATE__.reader.chapterData.isChapterLock === true`。实测第 201 章网页版 169 字符，完整正文 2084 字符。
+
+### 21.2 方案
+
+内联 [naiyQAQ/fanqie-assistant](https://github.com/naiyQAQ/fanqie-assistant)（MIT）的 APP 端签名与解密逻辑，纯 JS/WebCrypto 实现，无 native 依赖：
+
+| 组件 | 算法 |
+|---|---|
+| X-Argus | SM3 + Simon-128/256 + Protobuf + AES-128-CBC |
+| X-Ladon | Speck-128/128 + Base64 |
+| X-Khronos | 时间戳 |
+| X-SS-STUB | MD5(body) |
+| 正文解密 | AES-128-CBC，key 来自 `/crypt/registerkey` |
+
+硬编码常量（来自上游源码）：
+
+- `signKey` = `ac1adaae95a7af94a5114ab3b3a97dd80050aa0a39314c40528caec95256c28c`
+- `shared_key` = `[172,37,198,125,221,143,56,193,179,122,35,72,130,142,34,46]`
+- `aid` = `1967`，`licenseId` = `1611921764`
+
+### 21.3 三级回退
+
+1. 用户代理（`FANQIE_PROXY_API` 或 KV `proxy_api`）
+2. 网页 `/reader/{item_id}`，非锁定且 ≥500 字符直接返回
+3. `__FQ.getFullChapter(item_id)` → APP 接口 → AES-CBC 解密 → `xhtmlToText`
+
+返回字段 `from` 标识来源：`proxy` / `web` / `app`。
+
+### 21.4 实测
+
+| 测试 | 结果 |
+|---|---|
+| 第 1 章（免费） | `from: web`，2732 字符 |
+| 第 201 章（VIP） | `from: app`，2084 字符，`locked: false` |
+| 批量 5 章 | 6.15 秒，零失败 |
+| 批量 20 章 | 6.60 秒，44610 字符，零失败 |
+
+APP 接口不需要 PUA 字体解码，20 章 6.6 秒，远低于 Workers 30 秒上限。
+
+### 21.5 设备策略
+
+- 使用上游内置匿名设备，不注册新设备
+- 每个 Worker 实例首次请求调一次 `/crypt/registerkey`，内存缓存 6 小时
+- key 失效（`content === 'Invalid'` 或 `key_version` 不匹配）自动重新注册
+- 空响应（设备作废）时注册新设备重试一次
+
+### 21.6 许可
+
+内联代码保留上游 MIT 许可与来源注释，见 `worker.js` 中 `// ========== fanqie-assistant 内联` 段落。
