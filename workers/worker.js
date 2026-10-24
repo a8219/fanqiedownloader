@@ -4897,8 +4897,11 @@ function xhtmlToText(xhtml) {
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/h1>/gi, "\n")
     .replace(/<[^>]+>/g, "");
-  t = t.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
-       .replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+  t = t.replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+       .replace(/&quot;/g, "\"").replace(/&apos;/g, "'")
+       .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+       .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n))
+       .replace(/&amp;/g, "&");
   return t.replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -5541,8 +5544,379 @@ async function hConfig(req, env) {
   return json({ code: 405 }, 405);
 }
 
+
+// ========== 账号系统与管理面板（移植自 tgbot.py）==========
+const KV_USERS = "users";
+const KV_SETTINGS = "settings";
+const KV_LOGIN_LOG = "login_log";
+const KV_ADMIN_SESSIONS = "admin_sessions";
+const KV_LOGIN_SESSIONS = "login_sessions";
+const DEFAULT_DAILY_LIMIT = 5;
+const DEFAULT_WELCOME = "📖 番茄小说下载器\n\n发送小说链接即可下载完整 TXT。";
+
+async function kvGet(env, key, def) {
+  if (!env?.FANQIE_KV) return def;
+  const v = await env.FANQIE_KV.get(key);
+  if (v === null) return def;
+  try { return JSON.parse(v); } catch (e) { return def; }
+}
+async function kvSet(env, key, val) {
+  if (!env?.FANQIE_KV) return;
+  await env.FANQIE_KV.put(key, JSON.stringify(val));
+}
+async function loadUsers(env) { return await kvGet(env, KV_USERS, {}); }
+async function saveUsers(env, v) { return await kvSet(env, KV_USERS, v); }
+async function loadSettings(env) {
+  const s = await kvGet(env, KV_SETTINGS, null);
+  return s || { daily_limit: DEFAULT_DAILY_LIMIT, welcome: "", announcement: "" };
+}
+async function saveSettings(env, s) { return await kvSet(env, KV_SETTINGS, s); }
+async function loadLoginLog(env) { return await kvGet(env, KV_LOGIN_LOG, {}); }
+async function saveLoginLog(env, v) { return await kvSet(env, KV_LOGIN_LOG, v); }
+async function loadAdminSessions(env) { return await kvGet(env, KV_ADMIN_SESSIONS, []); }
+async function saveAdminSessions(env, v) { return await kvSet(env, KV_ADMIN_SESSIONS, v); }
+async function loadLoginSessions(env) { return await kvGet(env, KV_LOGIN_SESSIONS, {}); }
+async function saveLoginSessions(env, v) { return await kvSet(env, KV_LOGIN_SESSIONS, v); }
+
+function validUsername(n) { return /^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$/.test(n); }
+function passwordIssues(pw) {
+  if (pw.length < 8) return "密码至少 8 位";
+  if (!/[A-Za-z]/.test(pw)) return "密码需包含字母";
+  if (!/[0-9]/.test(pw)) return "密码需包含数字";
+  return "";
+}
+async function hashPw(pw) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function accountExists(users, name) {
+  const n = name.toLowerCase();
+  return Object.values(users).some(u => String(u.account || "").toLowerCase() === n);
+}
+function findUserByAccount(users, name) {
+  const n = name.toLowerCase();
+  return Object.values(users).find(u => String(u.account || "").toLowerCase() === n);
+}
+function todayStr() {
+  const now = new Date();
+  const cst = new Date(now.getTime() + 8 * 3600 * 1000);
+  return cst.toISOString().slice(0, 10);
+}
+
+async function isAdmin(env, uid) {
+  const s = await loadAdminSessions(env);
+  return Array.isArray(s) && s.includes(String(uid));
+}
+async function isBanned(env, uid) {
+  const u = await loadUsers(env);
+  return !!(u[String(uid)] && u[String(uid)].banned);
+}
+async function logLogin(env, chatId, username, ok, reason) {
+  const log = await loadLoginLog(env);
+  const key = String(chatId);
+  if (!log[key]) log[key] = [];
+  log[key].push({
+    t: new Date().toISOString().slice(0, 19),
+    username, ok: !!ok, reason: reason || "",
+  });
+  log[key] = log[key].slice(-50);
+  await saveLoginLog(env, log);
+}
+async function recentFails(env, chatId, windowSec) {
+  const log = await loadLoginLog(env);
+  const entries = (log[String(chatId)] || []).slice(-20);
+  const now = Date.now();
+  let n = 0;
+  for (const e of entries) {
+    const t = Date.parse(e.t);
+    if (!isNaN(t) && (now - t) / 1000 <= windowSec && !e.ok) n++;
+  }
+  return n;
+}
+
+async function recordUser(env, from, chatId) {
+  const users = await loadUsers(env);
+  const key = String(chatId);
+  const today = todayStr();
+  let u = users[key];
+  if (!u) {
+    u = { id: chatId, username: from?.username || "", first_name: from?.first_name || "",
+          today, today_count: 0, total: 0, banned: false, first_seen: today, last_seen: today };
+  } else {
+    u.username = from?.username || u.username || "";
+    u.first_name = from?.first_name || u.first_name || "";
+    u.last_seen = today;
+    if (u.today !== today) { u.today = today; u.today_count = 0; }
+  }
+  users[key] = u;
+  await saveUsers(env, users);
+  return u;
+}
+
+async function checkAndConsumeQuota(env, uid) {
+  const users = await loadUsers(env);
+  const key = String(uid);
+  const u = users[key];
+  if (!u) return { ok: false, msg: "用户记录不存在，请先发送 /start" };
+  const today = todayStr();
+  if (u.today !== today) { u.today = today; u.today_count = 0; }
+  if (await isAdmin(env, uid)) {
+    u.today_count = (u.today_count || 0) + 1;
+    u.total = (u.total || 0) + 1;
+    users[key] = u; await saveUsers(env, users);
+    return { ok: true, msg: "" };
+  }
+  const settings = await loadSettings(env);
+  let limit = (u.daily_limit === undefined || u.daily_limit === null) ? settings.daily_limit : u.daily_limit;
+  limit = parseInt(limit, 10) || 0;
+  if (limit === 0) return { ok: false, msg: "⛔ 你的账号当前被禁止下载，请联系管理员。" };
+  if (limit < 0) {
+    u.today_count = (u.today_count || 0) + 1;
+    u.total = (u.total || 0) + 1;
+    users[key] = u; await saveUsers(env, users);
+    return { ok: true, msg: "" };
+  }
+  const used = u.today_count || 0;
+  if (used >= limit) return { ok: false, msg: `⚠️ 今日下载次数已达上限（${limit} 次/天）。\n管理员无此限制，明天 0 点（北京时间）自动重置。` };
+  u.today_count = used + 1;
+  u.total = (u.total || 0) + 1;
+  users[key] = u; await saveUsers(env, users);
+  return { ok: true, msg: "" };
+}
+
+async function refundQuota(env, uid) {
+  const users = await loadUsers(env);
+  const key = String(uid);
+  const u = users[key];
+  if (!u) return;
+  if ((u.today_count || 0) > 0) u.today_count -= 1;
+  if ((u.total || 0) > 0) u.total -= 1;
+  users[key] = u;
+  await saveUsers(env, users);
+}
+
+
+// ---------- 管理面板 UI ----------
+async function tgAnswerCallback(token, callbackId, text, alert) {
+  return tgCall(token, "answerCallbackQuery", {
+    callback_query_id: callbackId,
+    text: text || "",
+    show_alert: !!alert,
+  });
+}
+
+async function tgEditMessage(token, chatId, messageId, text, replyMarkup) {
+  return tgCall(token, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: replyMarkup || undefined,
+  });
+}
+
+function adminMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "👥 用户记录", callback_data: "admin_users" }, { text: "📊 下载统计", callback_data: "admin_stats" }],
+      [{ text: "🚫 封禁列表", callback_data: "admin_bans" }, { text: "🎚 每日上限", callback_data: "admin_limit" }],
+      [{ text: "📝 欢迎语", callback_data: "admin_welcome" }, { text: "📢 公告", callback_data: "admin_announce" }],
+      [{ text: "🔐 登录日志", callback_data: "admin_logins" }, { text: "❌ 关闭", callback_data: "admin_close" }],
+    ],
+  };
+}
+
+function userDisplay(u) {
+  const un = u.account || u.username || "";
+  const fn = u.first_name || "";
+  const name = un ? `@${un}` : (fn || "（无昵称）");
+  return name;
+}
+
+async function adminUsersPage(env, offset) {
+  const users = await loadUsers(env);
+  const items = Object.values(users).sort((a, b) => Number(b.id) - Number(a.id));
+  const pageSize = 8;
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const page = Math.max(0, Math.min(offset || 0, totalPages - 1));
+  const slice = items.slice(page * pageSize, (page + 1) * pageSize);
+  const lines = [`👥 用户记录（第 ${page + 1}/${totalPages} 页，共 ${items.length} 人）\n`];
+  for (const u of slice) {
+    const ban = u.banned ? "🚫" : "✅";
+    lines.push(`${ban} ${tgEscape(userDisplay(u))}\n   ID: <code>${u.id}</code>  今日: ${u.today_count || 0}  总计: ${u.total || 0}`);
+  }
+  if (!slice.length) lines.push("暂无用户记录");
+  const buttons = [];
+  const row = [];
+  if (page > 0) row.push({ text: "⬅️ 上一页", callback_data: `admin_users:${page - 1}` });
+  if (page < totalPages - 1) row.push({ text: "➡️ 下一页", callback_data: `admin_users:${page + 1}` });
+  if (row.length) buttons.push(row);
+  for (const u of slice) {
+    const uid = u.id;
+    const dl = u.daily_limit;
+    const limitTag = dl === undefined || dl === null ? "" : ` | ${dl === 0 ? "禁止" : dl === -1 ? "∞" : dl + "次"}`;
+    buttons.push([{ text: u.banned ? `✅ 解封 ${userDisplay(u)}` : `🚫 封禁 ${userDisplay(u)}`, callback_data: `admin_${u.banned ? "unban" : "ban"}:${uid}` }]);
+    buttons.push([{ text: `🎚 设上限 ${userDisplay(u)}${limitTag}`, callback_data: `admin_setlimit:${uid}` }]);
+  }
+  buttons.push([{ text: "🔙 返回", callback_data: "admin_menu" }]);
+  return { text: lines.join("\n"), keyboard: { inline_keyboard: buttons } };
+}
+
+async function adminBansPage(env) {
+  const users = await loadUsers(env);
+  const banned = Object.values(users).filter(u => u.banned);
+  const lines = [`🚫 封禁列表（${banned.length} 人）\n`];
+  for (const u of banned) lines.push(`${userDisplay(u)}  ID: <code>${u.id}</code>`);
+  if (!banned.length) lines.push("当前没有被封禁的用户");
+  const buttons = banned.map(u => [{ text: `✅ 解封 ${userDisplay(u)}`, callback_data: `admin_unban:${u.id}` }]);
+  buttons.push([{ text: "🔙 返回", callback_data: "admin_menu" }]);
+  return { text: lines.join("\n"), keyboard: { inline_keyboard: buttons } };
+}
+
+
+// ---------- 管理回调处理 ----------
+async function tgHandleCallback(env, token, cq) {
+  const uid = cq.from?.id;
+  const data = cq.data || "";
+  const msg = cq.message;
+  const chatId = msg?.chat?.id;
+  const messageId = msg?.message_id;
+
+  if (!uid || !(await isAdmin(env, uid))) {
+    await tgAnswerCallback(token, cq.id, "⛔ 无权限", true);
+    return;
+  }
+  await tgAnswerCallback(token, cq.id, "", false);
+
+  const edit = async (text, kb) => {
+    try { await tgEditMessage(token, chatId, messageId, text, kb); }
+    catch (e) { await tgCall(token, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: kb }); }
+  };
+
+  if (data === "admin_menu") {
+    await edit("🛠 管理面板", adminMenuKeyboard());
+    return;
+  }
+  if (data === "admin_close") {
+    try { await tgCall(token, "deleteMessage", { chat_id: chatId, message_id: messageId }); } catch (e) {}
+    return;
+  }
+  if (data === "admin_users" || data.startsWith("admin_users:")) {
+    const off = data.startsWith("admin_users:") ? parseInt(data.split(":")[1], 10) : 0;
+    const r = await adminUsersPage(env, off);
+    await edit(r.text, r.keyboard);
+    return;
+  }
+  if (data === "admin_bans") {
+    const r = await adminBansPage(env);
+    await edit(r.text, r.keyboard);
+    return;
+  }
+  if (data.startsWith("admin_ban:") || data.startsWith("admin_unban:")) {
+    const [act, target] = data.split(":");
+    const users = await loadUsers(env);
+    const t = users[String(target)];
+    if (!t) { await edit("⚠️ 未找到该用户", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_menu" }]] }); return; }
+    t.banned = act === "admin_ban";
+    users[String(target)] = t;
+    await saveUsers(env, users);
+    const verb = act === "admin_ban" ? "🚫 已封禁" : "✅ 已解封";
+    const r = await adminBansPage(env);
+    await edit(`${verb}：${userDisplay(t)}（<code>${target}</code>）\n\n${r.text}`, r.keyboard);
+    return;
+  }
+  if (data === "admin_stats") {
+    const users = await loadUsers(env);
+    const today = todayStr();
+    const items = Object.values(users);
+    const activeToday = items.filter(u => u.today === today && (u.today_count || 0) > 0).length;
+    const bannedN = items.filter(u => u.banned).length;
+    const totalDl = items.reduce((s, u) => s + Number(u.total || 0), 0);
+    const todayDl = items.filter(u => u.today === today).reduce((s, u) => s + Number(u.today_count || 0), 0);
+    const s = await loadSettings(env);
+    const lim = s.daily_limit;
+    const limDesc = lim === 0 ? "禁止下载" : lim === -1 ? "无上限" : `${lim} 次/人/天`;
+    await edit(
+      `📊 下载统计\n\n👤 总用户数：${items.length}\n🟢 今日活跃：${activeToday}\n🚫 已封禁：${bannedN}\n📥 今日下载：${todayDl} 次\n📚 历史下载：${totalDl} 次\n🎚 全局每日上限：${limDesc}`,
+      { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_menu" }]] }
+    );
+    return;
+  }
+  if (data === "admin_limit") {
+    const s = await loadSettings(env);
+    const lim = s.daily_limit;
+    const desc = lim === 0 ? "⛔ 禁止下载（维护状态）" : lim === -1 ? "♾ 无上限" : `每人 ${lim} 次/天`;
+    await edit(
+      `🎚 全局每日下载上限\n\n当前：${desc}\n管理员始终不受限制。\n\n发送新数值修改：\n• 正整数（如 5）= 每人每天 5 次\n• 0 = 禁止下载\n• -1 = 无上限\n• /cancel 取消`,
+      { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_menu" }]] }
+    );
+    await kvSet(env, `pending:${chatId}`, { type: "limit" });
+    return;
+  }
+  if (data.startsWith("admin_setlimit:")) {
+    const target = data.split(":")[1];
+    const users = await loadUsers(env);
+    const t = users[String(target)];
+    if (!t) { await edit("⚠️ 未找到该用户", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_users:0" }]] }); return; }
+    const cur = t.daily_limit;
+    const curDesc = cur === undefined || cur === null ? "跟随全局" : cur === 0 ? "⛔ 禁止下载" : cur === -1 ? "♾ 无上限" : `${cur} 次/天`;
+    const s = await loadSettings(env);
+    await edit(
+      `🎚 设置 ${userDisplay(t)} 的每日下载上限\n\n当前：${curDesc}\n全局上限：${s.daily_limit}\n\n发送新数值：\n• 正整数 = 该用户每天 n 次\n• 0 = 禁止该用户下载\n• -1 = 该用户无上限\n• del = 恢复跟随全局\n• /cancel 取消`,
+      { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_users:0" }]] }
+    );
+    await kvSet(env, `pending:${chatId}`, { type: "setlimit", target });
+    return;
+  }
+  if (data === "admin_welcome") {
+    const s = await loadSettings(env);
+    const cur = s.welcome || DEFAULT_WELCOME;
+    await edit(
+      `📝 欢迎语设置\n\n当前：\n${tgEscape(cur)}\n\n直接发送新的欢迎语内容即可修改（/cancel 取消）。`,
+      { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_menu" }]] }
+    );
+    await kvSet(env, `pending:${chatId}`, { type: "welcome" });
+    return;
+  }
+  if (data === "admin_announce") {
+    const s = await loadSettings(env);
+    const cur = String(s.announcement || "").trim();
+    await edit(
+      `📢 公告设置\n\n当前：\n${cur ? tgEscape(cur) : "（空，无公告）"}\n\n发送新公告内容即可修改；发送单个减号 - 清除公告；/cancel 取消。`,
+      { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_menu" }]] }
+    );
+    await kvSet(env, `pending:${chatId}`, { type: "announce" });
+    return;
+  }
+  if (data === "admin_logins") {
+    const log = await loadLoginLog(env);
+    const lines = ["🔐 登录日志（各 chat 最近 8 条）\n"];
+    for (const [chat, entries] of Object.entries(log)) {
+      const acct = entries.length ? (entries[entries.length - 1].username || "?") : "?";
+      lines.push(`Chat <code>${chat}</code>（最近账号：${acct}）`);
+      for (const e of entries.slice(-8)) {
+        const mark = e.ok ? "✅" : "❌";
+        lines.push(`  ${mark} ${e.t} ${e.reason || ""}`);
+      }
+      lines.push("");
+    }
+    if (!Object.keys(log).length) lines.push("暂无登录记录");
+    await edit(lines.join("\n").slice(0, 3500), { inline_keyboard: [[{ text: "🔙 返回", callback_data: "admin_menu" }]] });
+    return;
+  }
+}
+
 // ---------- Telegram Bot ----------
 const TG_API = "https://api.telegram.org/bot";
+
+
+function tgEscape(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 async function tgCall(token, method, body) {
   return fetch(`${TG_API}${token}/${method}`, {
@@ -5554,6 +5928,10 @@ async function tgCall(token, method, body) {
 
 async function tgSend(token, chatId, text) {
   return tgCall(token, "sendMessage", { chat_id: chatId, text, disable_web_page_preview: true });
+}
+
+async function tgSendHtml(token, chatId, text) {
+  return tgCall(token, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
 }
 
 async function tgSendDoc(token, chatId, filename, content, caption) {
@@ -5593,27 +5971,240 @@ async function fetchChaptersParallel(env, items, concurrency) {
 }
 
 async function tgHandleUpdate(env, token, update, origin) {
+  // 回调按钮
+  if (update.callback_query) {
+    return tgHandleCallback(env, token, update.callback_query);
+  }
+
   const msg = update.message || update.channel_post;
   if (!msg || !msg.text) return;
   const chatId = msg.chat.id;
   const text = msg.text.trim();
+  const from = msg.from || {};
 
-  if (text === "/start" || text === "/help") {
-    await tgSend(token, chatId,
-      "发送番茄小说链接或 book_id 即可下载。\n" +
-      "例:\nhttps://fanqienovel.com/page/7143038691944959011\n" +
-      "或直接发 7143038691944959011");
+  await recordUser(env, from, chatId);
+
+  if (await isBanned(env, chatId)) {
+    await tgSend(token, chatId, "⛔ 您已被管理员封禁，如有疑问请联系管理员。");
     return;
   }
 
+  // ---------- 全局 /cancel：优先中断活跃下载 ----------
+  if (text === "/cancel") {
+    let interrupted = false;
+    if (env?.FANQIE_KV && env?.FANQIE_DO) {
+      try {
+        const active = await env.FANQIE_KV.get(`active:${chatId}`);
+        if (active) {
+          const info = JSON.parse(active);
+          const did = env.FANQIE_DO.idFromName(`book:${info.bookId}:${chatId}`);
+          const dstub = env.FANQIE_DO.get(did);
+          await dstub.fetch("https://do/cancel", { method: "POST" });
+          interrupted = true;
+          await tgSend(token, chatId, `⏹ 已请求中断《${info.bookName || info.bookId}》的补抓，正在发送当前结果...`);
+        }
+      } catch (e) {}
+    }
+    if (!interrupted) {
+      const ss = await loadLoginSessions(env);
+      delete ss[String(chatId)];
+      await saveLoginSessions(env, ss);
+      if (env?.FANQIE_KV) { try { await env.FANQIE_KV.delete(`pending:${chatId}`); } catch (e) {} }
+      await tgSend(token, chatId, "已取消。");
+    }
+    return;
+  }
+
+  // ---------- 管理面板等待输入 ----------
+  const pending = await kvGet(env, `pending:${chatId}`, null);
+  if (pending) {
+    if (text === "/cancel") {
+      await env.FANQIE_KV.delete(`pending:${chatId}`);
+      await tgSend(token, chatId, "已取消。");
+      return;
+    }
+    if (pending.type === "limit") {
+      const n = parseInt(text, 10);
+      if (isNaN(n) || (n !== -1 && n !== 0 && (n < 1 || n > 999))) {
+        await tgSend(token, chatId, "⚠️ 数值超出范围（1~999、0 或 -1），请重发或 /cancel 取消。");
+        return;
+      }
+      const s = await loadSettings(env);
+      s.daily_limit = n;
+      await saveSettings(env, s);
+      await env.FANQIE_KV.delete(`pending:${chatId}`);
+      const desc = n === 0 ? "禁止下载" : n === -1 ? "无上限" : `${n} 次/天`;
+      await tgSend(token, chatId, `✅ 全局每日上限已设为：${desc}`);
+      return;
+    }
+    if (pending.type === "setlimit") {
+      const users = await loadUsers(env);
+      const t = users[String(pending.target)];
+      if (!t) { await env.FANQIE_KV.delete(`pending:${chatId}`); await tgSend(token, chatId, "⚠️ 未找到该用户"); return; }
+      if (text === "del") { delete t.daily_limit; users[String(pending.target)] = t; await saveUsers(env, users); await env.FANQIE_KV.delete(`pending:${chatId}`); await tgSend(token, chatId, "✅ 已恢复跟随全局上限"); return; }
+      const n = parseInt(text, 10);
+      if (isNaN(n) || (n !== -1 && n !== 0 && (n < 1 || n > 999))) {
+        await tgSend(token, chatId, "⚠️ 数值超出范围（1~999、0、-1 或 del），请重发或 /cancel 取消。");
+        return;
+      }
+      t.daily_limit = n;
+      users[String(pending.target)] = t;
+      await saveUsers(env, users);
+      await env.FANQIE_KV.delete(`pending:${chatId}`);
+      const desc = n === 0 ? "禁止下载" : n === -1 ? "无上限" : `${n} 次/天`;
+      await tgSend(token, chatId, `✅ ${userDisplay(t)} 的每日上限已设为：${desc}`);
+      return;
+    }
+    if (pending.type === "welcome" || pending.type === "announce") {
+      const s = await loadSettings(env);
+      if (pending.type === "welcome") s.welcome = text;
+      else s.announcement = text === "-" ? "" : text;
+      await saveSettings(env, s);
+      await env.FANQIE_KV.delete(`pending:${chatId}`);
+      await tgSend(token, chatId, `✅ ${pending.type === "welcome" ? "欢迎语" : "公告"}已更新。`);
+      return;
+    }
+  }
+
+  // ---------- /start /help ----------
+  if (text === "/start" || text === "/help") {
+    const s = await loadSettings(env);
+    const welcome = tgEscape(s.welcome || DEFAULT_WELCOME);
+    const ann = String(s.announcement || "").trim();
+    let out = welcome;
+    if (ann) out += `\n\n📢 <b>公告</b>\n${tgEscape(ann)}`;
+    out += "\n\n<b>命令</b>\n/login 登录\n/signup 注册\n/admin 管理面板（管理员）\n/cancel 取消当前输入";
+    await tgCall(token, "sendMessage", { chat_id: chatId, text: out, parse_mode: "HTML", disable_web_page_preview: true });
+    return;
+  }
+
+  // ---------- 登录/注册会话 ----------
+  const sessions = await loadLoginSessions(env);
+  const sess = sessions[String(chatId)];
+  if (sess) {
+    if (text === "/cancel") {
+      delete sessions[String(chatId)];
+      await saveLoginSessions(env, sessions);
+      await tgSend(token, chatId, "已取消。");
+      return;
+    }
+    if (sess.step === "username") {
+      const input = text.trim();
+      if (sess.mode === "signup") {
+        if (!validUsername(input)) { await tgSend(token, chatId, "⚠️ 用户名格式不正确（3~32 位，字母/数字/下划线/横线，首位为字母或数字）"); return; }
+        const users = await loadUsers(env);
+        if (accountExists(users, input)) { await tgSend(token, chatId, "⚠️ 该用户名已被占用，请换一个。"); return; }
+        sess.username = input; sess.step = "reg_password";
+        sessions[String(chatId)] = sess; await saveLoginSessions(env, sessions);
+        await tgSend(token, chatId, "🔑 请输入密码（至少 8 位，需同时包含字母和数字）");
+        return;
+      }
+      sess.username = input; sess.step = "password";
+      sessions[String(chatId)] = sess; await saveLoginSessions(env, sessions);
+      await tgSend(token, chatId, "🔑 请输入密码：");
+      return;
+    }
+    if (sess.step === "reg_password") {
+      const newUser = sess.username || "";
+      const pw = text.trim();
+      delete sessions[String(chatId)];
+      await saveLoginSessions(env, sessions);
+      const issue = passwordIssues(pw);
+      if (issue) { await tgSend(token, chatId, `⚠️ ${issue}，请重新 /signup 注册。`); return; }
+      const users = await loadUsers(env);
+      if (accountExists(users, newUser)) { await tgSend(token, chatId, "⚠️ 该用户名已被占用，请换一个重新 /signup。"); return; }
+      let u = users[String(chatId)];
+      if (!u) u = { id: chatId, username: from.username || "", first_name: from.first_name || "", today: todayStr(), today_count: 0, total: 0, banned: false, first_seen: todayStr(), last_seen: todayStr() };
+      u.account = newUser;
+      u.pwd_hash = await hashPw(pw);
+      users[String(chatId)] = u;
+      await saveUsers(env, users);
+      await logLogin(env, chatId, newUser, true, "signup");
+      await tgSend(token, chatId, `✅ 注册成功！账号：${newUser}\n现在可以正常下载了。`);
+      return;
+    }
+    if (sess.step === "password") {
+      const inputUser = sess.username || "";
+      const inputPass = text.trim();
+      delete sessions[String(chatId)];
+      await saveLoginSessions(env, sessions);
+      const admU = env?.FANQIE_ADMIN_USERNAME || "";
+      const admP = env?.FANQIE_ADMIN_PASSWORD || "";
+      if (admU && admP && inputUser === admU && inputPass === admP) {
+        const list = await loadAdminSessions(env);
+        if (!list.includes(String(chatId))) list.push(String(chatId));
+        await saveAdminSessions(env, list);
+        await logLogin(env, chatId, inputUser, true, "admin");
+        await tgSend(token, chatId, "✅ 管理员登录成功！\n发送 /admin 打开管理面板。");
+        return;
+      }
+      const users = await loadUsers(env);
+      const u = findUserByAccount(users, inputUser);
+      const pwh = await hashPw(inputPass);
+      if (u && u.pwd_hash === pwh) {
+        await logLogin(env, chatId, inputUser, true, "user");
+        await tgSend(token, chatId, `✅ 登录成功！账号：${inputUser}`);
+        return;
+      }
+      await logLogin(env, chatId, inputUser, false, "bad_credentials");
+      const fails = await recentFails(env, chatId, 600);
+      if (fails >= 3) {
+        await tgSend(token, chatId, "❌ 账号或密码错误。\n⚠️ 短时间内多次失败，已通知管理员。");
+        const admins = await loadAdminSessions(env);
+        for (const aid of admins) {
+          try { await tgSendHtml(token, aid, `⚠️ 异常登录告警\nChat ID: <code>${chatId}</code>\n用户名尝试：${tgEscape(inputUser)}\n10 分钟内失败 ${fails} 次`); } catch (e) {}
+        }
+      } else {
+        await tgSend(token, chatId, "❌ 账号或密码错误。");
+      }
+      return;
+    }
+    delete sessions[String(chatId)];
+    await saveLoginSessions(env, sessions);
+  }
+
+  if (text === "/login") {
+    if (!env?.FANQIE_KV) { await tgSend(token, chatId, "⚠️ 未绑定 KV，账号系统不可用"); return; }
+    sessions[String(chatId)] = { step: "username", mode: "login" };
+    await saveLoginSessions(env, sessions);
+    await tgSend(token, chatId, "🔐 请输入账号：");
+    return;
+  }
+  if (text === "/signup") {
+    if (!env?.FANQIE_KV) { await tgSend(token, chatId, "⚠️ 未绑定 KV，账号系统不可用"); return; }
+    sessions[String(chatId)] = { step: "username", mode: "signup" };
+    await saveLoginSessions(env, sessions);
+    await tgSend(token, chatId, "📝 注册：请输入用户名（3~32 位，字母/数字/下划线/横线）");
+    return;
+  }
+  if (text === "/admin") {
+    if (!(await isAdmin(env, chatId))) return;
+    await tgCall(token, "sendMessage", { chat_id: chatId, text: "🛠 管理面板", reply_markup: adminMenuKeyboard() });
+    return;
+  }
+
+  // ---------- 下载 ----------
   const bookId = await parseBookId(text);
   if (!bookId) {
-    await tgSend(token, chatId, "无法识别，请发送番茄小说链接或 15 位以上 book_id");
+    await tgSend(token, chatId, "⚠️ 无法识别小说URL或ID。\n\n请发送类似：https://fanqienovel.com/page/7615694942362422297");
     return;
   }
+
+  if (!(await isAdmin(env, chatId))) {
+    const users = await loadUsers(env);
+    const u = users[String(chatId)];
+    if (!u || !u.account) {
+      await tgSend(token, chatId, "⚠️ 请先注册账号后才能下载。\n发送 /signup 注册（用户名+密码）。");
+      return;
+    }
+  }
+
+  const quota = await checkAndConsumeQuota(env, chatId);
+  if (!quota.ok) { await tgSend(token, chatId, quota.msg); return; }
 
   const dirJson = await (await hDirectory(env, bookId)).json();
   if (dirJson.code !== 200) {
+    await refundQuota(env, chatId);
     await tgSend(token, chatId, "获取目录失败: " + (dirJson.message || "未知错误"));
     return;
   }
@@ -5621,65 +6212,33 @@ async function tgHandleUpdate(env, token, update, origin) {
   const lists = dirJson.data.lists || [];
   const bookName = dirJson.data.book_name || bookId;
   const total = lists.length;
-  if (!total) { await tgSend(token, chatId, "目录为空"); return; }
+  if (!total) { await refundQuota(env, chatId); await tgSend(token, chatId, "目录为空"); return; }
 
-  // 优先走 Durable Object 链式 alarm（秒级）
   if (env?.FANQIE_DO) {
     const id = env.FANQIE_DO.idFromName(`book:${bookId}:${chatId}`);
     const stub = env.FANQIE_DO.get(id);
     await stub.fetch("https://do/", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chatId, bookId, bookName, total, lists, cursor: 0, chunks: [], createdAt: Date.now()
-      }),
+      body: JSON.stringify({ chatId, bookId, bookName, total, lists, cursor: 0, chunks: [], createdAt: Date.now() }),
     });
-    await tgSend(token, chatId,
-      `《${bookName}》共 ${total} 章，已启动加速下载（约 ${Math.ceil(total / 45)} 轮 × 数秒），完成后自动发送全书 TXT。`);
+    await tgSend(token, chatId, `《${bookName}》共 ${total} 章，已启动加速下载（约 ${Math.ceil(total / 45)} 轮 × 数秒），完成后自动发送全书 TXT。`);
     return;
   }
 
-  // 有 KV 时走 Cron 全自动队列（分钟级）
   if (env?.FANQIE_KV) {
     const jobKey = `job:${bookId}:${chatId}`;
-    await env.FANQIE_KV.put(jobKey, JSON.stringify({
-      chatId, bookId, bookName, total, lists, cursor: 0, chunks: [], createdAt: Date.now()
-    }));
-    let pending = [];
-    try { pending = JSON.parse((await env.FANQIE_KV.get("jobs:pending")) || "[]"); } catch (e) {}
-    if (!pending.includes(jobKey)) pending.push(jobKey);
-    await env.FANQIE_KV.put("jobs:pending", JSON.stringify(pending));
-    const eta = Math.ceil(total / 45);
-    await tgSend(token, chatId, `《${bookName}》共 ${total} 章，已加入队列。每分钟抓 45 章，预计约 ${eta} 分钟完成，完成后自动发送全书 TXT。`);
+    await env.FANQIE_KV.put(jobKey, JSON.stringify({ chatId, bookId, bookName, total, lists, cursor: 0, chunks: [], createdAt: Date.now() }));
+    let pendingList = [];
+    try { pendingList = JSON.parse((await env.FANQIE_KV.get("jobs:pending")) || "[]"); } catch (e) {}
+    if (!pendingList.includes(jobKey)) pendingList.push(jobKey);
+    await env.FANQIE_KV.put("jobs:pending", JSON.stringify(pendingList));
+    await tgSend(token, chatId, `《${bookName}》共 ${total} 章，已加入队列。每分钟抓 45 章，预计约 ${Math.ceil(total / 45)} 分钟完成。`);
     return;
   }
 
-  const LIMIT = 30; // 无 KV 时降级：单次 30 章
-  const n = Math.min(total, LIMIT);
-  await tgSend(token, chatId, `《${bookName}》共 ${total} 章，开始下载前 ${n} 章...`);
-
-  const slice = lists.slice(0, n);
-  const parts = await fetchChaptersParallel(env, slice, 10);
-  let txt = parts.map((p) => p.text).join("\n\n");
-  const MAX_BYTES = 45 * 1024 * 1024;
-  let truncated = false;
-  if (new TextEncoder().encode(txt).length > MAX_BYTES) {
-    txt = txt.slice(0, Math.floor(txt.length * MAX_BYTES / new TextEncoder().encode(txt).length));
-    truncated = true;
-  }
-  const filename = total > n ? `${bookName}_1-${n}_of_${total}.txt` : `${bookName}.txt`;
-  const caption = `第 1-${n} 章 / 共 ${total} 章` + (truncated ? "（已截断至 45MB）" : "");
-
-  await tgSendDoc(token, chatId, filename, txt, caption);
-
-  if (total > n) {
-    await tgSend(token, chatId,
-      `已发送前 ${n} 章。剩余 ${total - n} 章用分页接口继续:\n` +
-      `${origin}/api/download?book_id=${bookId}&start=${n}&count=30\n` +
-      `用返回的 next 循环拉取`);
-  } else {
-    await tgSend(token, chatId, `《${bookName}》全部 ${total} 章已发送`);
-  }
+  await refundQuota(env, chatId);
+  await tgSend(token, chatId, "⚠️ 需要绑定 Durable Object 或 KV 才能下载。");
 }
 
 async function hTelegramWebhook(request, env, ctx) {
@@ -5801,84 +6360,131 @@ export class FanqieJob {
   }
 
   async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/cancel") {
+      await this.state.storage.put("cancelled", true);
+      return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+    }
     const job = await request.json();
     job.chunks = job.chunks || [];
     await this.state.storage.put("job", job);
+    await this.state.storage.put("cancelled", false);
     await this.state.storage.setAlarm(Date.now() + 100);
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { "content-type": "application/json" },
-    });
+    // 记录活跃任务，供 /cancel 查找
+    if (this.env?.FANQIE_KV) {
+      try {
+        await this.env.FANQIE_KV.put(`active:${job.chatId}`, JSON.stringify({ bookId: job.bookId, bookName: job.bookName }));
+      } catch (e) {}
+    }
+    return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+  }
+
+  async finish(job, token) {
+    let txt = job.chunks.map((c) => (c && c.text) || "").join("\n\n");
+    const stillFailed = job.chunks.filter((c) => c && c.ok === false).length;
+    const MAX_BYTES = 45 * 1024 * 1024;
+    let truncated = false;
+    if (new TextEncoder().encode(txt).length > MAX_BYTES) {
+      txt = txt.slice(0, Math.floor(txt.length * MAX_BYTES / new TextEncoder().encode(txt).length));
+      truncated = true;
+    }
+    if (token) {
+      const cap = `全书 ${job.total} 章`
+        + (stillFailed > 0 ? `（${stillFailed} 章获取失败）` : "")
+        + (truncated ? "（已截断至 45MB）" : "");
+      try {
+        await tgSendDoc(token, job.chatId, `${job.bookName}.txt`, txt, cap);
+        await tgSend(token, job.chatId,
+          `《${job.bookName}》全部 ${job.total} 章已发送完毕`
+          + (stillFailed > 0 ? `，其中 ${stillFailed} 章补抓后仍失败` : ""));
+      } catch (e) {}
+    }
+    if (this.env?.FANQIE_KV) {
+      try { await this.env.FANQIE_KV.delete(`active:${job.chatId}`); } catch (e) {}
+    }
+    await this.state.storage.deleteAll();
   }
 
   async alarm() {
     const job = await this.state.storage.get("job");
     if (!job) return;
-
     const token = this.env?.TG_BOT_TOKEN;
-    const BATCH = 45;
-    const start = job.cursor || 0;
-    const end = Math.min(start + BATCH, job.total);
-    const slice = job.lists.slice(start, end);
+    const cancelled = await this.state.storage.get("cancelled");
 
-    let parts = [];
-    try {
-      parts = await fetchChaptersParallel(this.env, slice, 10);
-    } catch (e) {
-      parts = slice.map((it) => ({ id: String(it.item_id), title: it.title || it.item_id, ok: false, text: `## ${it.title || it.item_id}\n\n[获取失败: ${String(e)}]` }));
-    }
-
-    job.chunks = job.chunks || [];
-    job.chunks.push(...parts);
-    job.cursor = end;
-
-    if (job.cursor >= job.total) {
-      // 补抓失败章节（最多 40 章，避免超子请求上限）
-      const failedIdxs = job.chunks.map((c, i) => (c && c.ok === false) ? i : -1).filter((i) => i >= 0);
-      if (failedIdxs.length > 0 && failedIdxs.length <= 40) {
-        const retryItems = failedIdxs.map((i) => {
-          const cid = job.chunks[i].id;
-          return job.lists.find((l) => String(l.item_id) === cid) || { item_id: cid, title: cid };
-        });
-        try {
-          const retried = await fetchChaptersParallel(this.env, retryItems, 5);
-          for (let k = 0; k < retried.length; k++) {
-            if (retried[k].ok) job.chunks[failedIdxs[k]] = retried[k];
-          }
-        } catch (e) {}
-      }
-
-      let txt = job.chunks.map((c) => (c && c.text) || "").join("\n\n");
-      const stillFailed = job.chunks.filter((c) => c && c.ok === false).length;
-      const MAX_BYTES = 45 * 1024 * 1024;
-      let truncated = false;
-      if (new TextEncoder().encode(txt).length > MAX_BYTES) {
-        txt = txt.slice(0, Math.floor(txt.length * MAX_BYTES / new TextEncoder().encode(txt).length));
-        truncated = true;
-      }
-      if (token) {
-        const cap = `全书 ${job.total} 章`
-          + (stillFailed > 0 ? `（${stillFailed} 章获取失败）` : "")
-          + (truncated ? "（已截断至 45MB）" : "");
-        await tgSendDoc(token, job.chatId, `${job.bookName}.txt`, txt, cap);
-        await tgSend(token, job.chatId,
-          `《${job.bookName}》全部 ${job.total} 章已发送完毕`
-          + (stillFailed > 0 ? `，其中 ${stillFailed} 章补抓后仍失败` : ""));
-      }
-      await this.state.storage.deleteAll();
+    // 取消：直接发当前结果
+    if (cancelled) {
+      await this.finish(job, token);
       return;
     }
 
-    await this.state.storage.put("job", job);
+    // 正常批次
+    if ((job.cursor || 0) < job.total) {
+      const BATCH = 45;
+      const start = job.cursor || 0;
+      const end = Math.min(start + BATCH, job.total);
+      const slice = job.lists.slice(start, end);
+      let parts = [];
+      try {
+        parts = await fetchChaptersParallel(this.env, slice, 10);
+      } catch (e) {
+        parts = slice.map((it) => ({ id: String(it.item_id), title: it.title || it.item_id, ok: false, text: `## ${it.title || it.item_id}\n\n[获取失败: ${String(e)}]` }));
+      }
+      job.chunks = job.chunks || [];
+      job.chunks.push(...parts);
+      job.cursor = end;
+      await this.state.storage.put("job", job);
 
-    const prev = Math.floor(start / job.total * 4);
-    const now = Math.floor(job.cursor / job.total * 4);
-    if (token && now > prev) {
-      const pct = Math.floor(job.cursor / job.total * 100);
-      await tgSend(token, job.chatId, `《${job.bookName}》进度 ${job.cursor}/${job.total} (${pct}%)`);
+      const prev = Math.floor(start / job.total * 4);
+      const now = Math.floor(job.cursor / job.total * 4);
+      if (token && now > prev) {
+        const pct = Math.floor(job.cursor / job.total * 100);
+        try { await tgSend(token, job.chatId, `《${job.bookName}》进度 ${job.cursor}/${job.total} (${pct}%)`); } catch (e) {}
+      }
+      await this.state.storage.setAlarm(Date.now() + 1000);
+      return;
     }
 
-    // 立即调度下一轮（1 秒后），不依赖 Cron
-    await this.state.storage.setAlarm(Date.now() + 1000);
+    // 全部抓完 → 补抓失败章节，最多 5 分钟
+    const now0 = Date.now();
+    const retryStart = job.retryStart || now0;
+    job.retryStart = retryStart;
+    const elapsed = now0 - retryStart;
+    const FAILED = job.chunks.map((c, i) => (c && c.ok === false) ? i : -1).filter((i) => i >= 0);
+
+    if (FAILED.length === 0) {
+      await this.finish(job, token);
+      return;
+    }
+    if (elapsed >= 5 * 60 * 1000) {
+      if (token) {
+        try { await tgSend(token, job.chatId, `⏱ 补抓已达 5 分钟上限，仍有 ${FAILED.length} 章失败，发送当前结果。`); } catch (e) {}
+      }
+      await this.finish(job, token);
+      return;
+    }
+
+    // 分批补抓，每批最多 40 章，20 秒一次
+    const batchIdx = FAILED.slice(0, 40);
+    const retryItems = batchIdx.map((i) => {
+      const cid = job.chunks[i].id;
+      return job.lists.find((l) => String(l.item_id) === cid) || { item_id: cid, title: cid };
+    });
+    try {
+      const retried = await fetchChaptersParallel(this.env, retryItems, 8);
+      for (let k = 0; k < retried.length; k++) {
+        if (retried[k].ok) job.chunks[batchIdx[k]] = retried[k];
+      }
+    } catch (e) {}
+    await this.state.storage.put("job", job);
+
+    const remain = job.chunks.filter((c) => c && c.ok === false).length;
+    if (token) {
+      const leftMin = Math.ceil((5 * 60 * 1000 - elapsed) / 60000);
+      try {
+        await tgSend(token, job.chatId, `🔄 补抓中：还剩 ${remain} 章失败，已用 ${Math.floor(elapsed / 1000)}s / 300s（剩余约 ${leftMin} 分钟）。发送 /cancel 可立即停止。`);
+      } catch (e) {}
+    }
+    await this.state.storage.setAlarm(Date.now() + 20000);
   }
 }
 
