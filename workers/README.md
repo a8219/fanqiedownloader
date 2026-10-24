@@ -269,3 +269,265 @@ EXPORTS: JNI_OnLoad (0x2a5194, 820 bytes)  <- 唯一导出符号
 
 1. **代理 API**（可选）：仅 `/api/search` 需要，详情/目录/正文/下载/TG 都不依赖
 2. **字体映射表**：离线一次性算好后硬编码进 `worker.js`，运行时不做任何字形计算
+
+## 13. 长域名短链支持
+
+番茄分享链接有多种形式，`parseBookId()` 全部支持：
+
+| 形式 | 示例 | 解析方式 |
+|---|---|---|
+| 纯 book_id | `7096667097870109733` | 直接匹配 |
+| fanqie 页面 | `https://fanqienovel.com/page/7096667097870109733` | 正则 |
+| fanqie 阅读页 | `https://fanqienovel.com/reader/7173216089122439711` | 正则 |
+| 带查询参数 | `...page/7096667097870109733?enter_from=search` | 正则 |
+| 长域名短链 | `https://changdunovel.com/t/oVotJ8xGHP4/` | 读 302 Location 里的 `book_id` |
+| share-v2 | `https://changdunovel.com/wap/share-v2.html?book_id=xxx` | 查询参数 |
+| book-share | `https://changdunovel.com/ug/pages/book-share?book_id=xxx` | 查询参数 |
+
+短链实测：`changdunovel.com/t/oVotJ8xGHP4/` → 302 → `Location: ...book_share?book_id=7592279900040465433`，提取成功。本地 mock 8/8 用例全通过。
+
+关键实现：用 `redirect: "manual"` 读 302 响应头，而不是 `follow` 后去匹配 `/page/` 路径——因为落点仍是 `book-share?book_id=`，不是 `/page/`。
+
+## 14. 导出格式
+
+### 14.1 `/api/export`（JSON 片段）
+
+| format | 返回字段 | 用途 |
+|---|---|---|
+| `txt` | `text` | 纯文本片段，`\n\n` 分隔章节 |
+| `html` | `html` | `<section>` 片段，带章节锚点 |
+| `epub` | `chapters[]` | 每章 `{id, title, xhtml}` |
+
+### 14.2 `/api/export/zip`（二进制 zip 直接下载）
+
+| format | zip 内文件 |
+|---|---|
+| `txt` | `书名_1-N.txt`（单文件，带 BOM） |
+| `html` | `index.html` + `chapter_00001_<id>.html` + ... |
+
+响应头携带分页信息：`x-total`、`x-start`、`x-count`、`x-next`（空字符串表示已到末尾）。
+
+ZIP 由自写 `makeZip()` 生成（STORE 模式无压缩），CRC32 多项式 `0xEDB88320`。验证：
+- `crc32("123456789")` = `cbf43926`（标准测试向量）
+- Python `zipfile.testzip()` 返回 `None`
+- 中英文文件名与内容均正确解码
+
+### 14.3 整本下载脚本
+
+~~~bash
+BASE="https://fanqie-downloader.3942369144a.workers.dev"
+BOOK="7592279900040465433"
+START=0
+: > "book_${BOOK}.txt"
+while :; do
+  R=$(curl -sS "$BASE/api/export?book_id=$BOOK&format=txt&start=$START&count=40")
+  echo "$R" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("text",""))' >> "book_${BOOK}.txt"
+  NEXT=$(echo "$R" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("next") or "")')
+  [ -z "$NEXT" ] && break
+  START=$NEXT
+done
+wc -l "book_${BOOK}.txt"
+~~~
+
+## 15. 更新检查 `/api/update`
+
+对比 KV 里记录的章节数，返回新增章节数：
+
+~~~json
+{
+  "code": 200,
+  "book_id": "7592279900040465433",
+  "book_name": "我操作的少女正在成为旧日之主",
+  "total": 503,
+  "last_seen": 0,
+  "new_chapters": 503,
+  "has_kv": false,
+  "next_start": 0
+}
+~~~
+
+- `has_kv: false` 表示未绑定 KV，每次全量
+- 绑定 KV 后 `last_seen` 记录上次章节数，`new_chapters` 只返回增量
+- `next_start` 直接传给 `/api/export` 的 `start`，只拉新增章节
+
+## 16. 与原 `main.py` 功能对照
+
+| 原功能 | 原实现 | Worker 实现 | 状态 |
+|---|---|---|---|
+| TXT 下载 | `_download_txt` | `/api/export?format=txt` + `/api/export/zip` | 已实现 |
+| HTML 下载 | `_download_html` | `/api/export?format=html` + `/api/export/zip` | 已实现 |
+| EPUB 下载 | `_download_epub` | `/api/export?format=epub`（xhtml 片段） | 已实现 |
+| 作者信息 | `_get_author_info` | `extractLdJson()` 抓 `author[0].name` | 线上验证 |
+| 封面 URL | `_get_cover_url` | `extractLdJson()` 抓 `image[0]` | 线上验证 |
+| 更新记录 | `_update_records` | `/api/update` + KV `record:<id>` | 已实现 |
+| 搜索 | `search_novel` | `/api/search`（需代理） | 降级 |
+| 批量下载 | `download_novel` 循环 | 客户端循环 `/api/export` | 已实现 |
+| 文件名清洗 | `_sanitize_filename` | 正则替换非法字符为 `_` | 已实现 |
+| 章节排序 | 按 `chapters.keys()` | `itemIds` reverse 后 `order` 递增 | 已实现 |
+
+## 17. 从零部署教程
+
+### 17.1 前置条件
+
+- Cloudflare 账号（免费版即可）
+- 一个 Telegram Bot（@BotFather 创建）
+- 可选：GitHub 账号（Git 集成部署）
+
+### 17.2 方式一：REST API 部署（无需 wrangler）
+
+第 1 步，创建 API Token：Dashboard → My Profile → API Tokens → Create Token → 模板选 Edit Cloudflare Workers。
+
+第 2 步，获取 Account ID：Dashboard 右侧栏，32 位十六进制。
+
+第 3 步，准备 `metadata.json`：
+
+~~~json
+{
+  "main_module": "worker.js",
+  "compatibility_date": "2026-10-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "bindings": [
+    {"type": "durable_object_namespace", "name": "FANQIE_DO", "class_name": "FanqieJob"}
+  ],
+  "exports": {
+    "FanqieJob": {"type": "durable-object", "storage": "sqlite"}
+  }
+}
+~~~
+
+首次部署用 `migrations`，之后更新必须改用 `exports`，否则报错 10074（Cannot apply new-sqlite-class migration to class that is already depended on by existing Durable Objects）。
+
+第 4 步，上传脚本：
+
+~~~bash
+curl -X PUT "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/workers/scripts/fanqie-downloader" \
+  -H "Authorization: Bearer <API_TOKEN>" \
+  -H "Content-Type: multipart/form-data" \
+  --form "metadata=@metadata.json;type=application/json" \
+  --form "worker.js=@worker.js;type=application/javascript+module"
+~~~
+
+第 5 步，启用 workers.dev：
+
+~~~bash
+curl -X POST "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/workers/scripts/fanqie-downloader/subdomain" \
+  -H "Authorization: Bearer <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  --data '{"enabled":true}'
+~~~
+
+第 6 步，设置 TG token：
+
+~~~bash
+curl -X PUT "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/workers/scripts/fanqie-downloader/secrets" \
+  -H "Authorization: Bearer <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  --data '{"name":"TG_BOT_TOKEN","text":"<真实token>","type":"secret_text"}'
+~~~
+
+第 7 步，注册 Webhook：
+
+~~~bash
+curl "https://fanqie-downloader.<subdomain>.workers.dev/tg/setup"
+~~~
+
+返回 `{"ok":true,"telegram":{"ok":true,"description":"Webhook was set"}}` 即成功。
+
+### 17.3 方式二：wrangler 部署
+
+~~~bash
+npm install -g wrangler
+export CLOUDFLARE_API_TOKEN="<token>"
+export CLOUDFLARE_ACCOUNT_ID="<account_id>"
+cd workers
+npx wrangler deploy
+npx wrangler secret put TG_BOT_TOKEN
+curl "https://fanqie-downloader.<sub>.workers.dev/tg/setup"
+~~~
+
+容器内无浏览器时 `wrangler login` 会因缺 `xdg-open` 失败，必须用 `CLOUDFLARE_API_TOKEN` 环境变量。若 wrangler 报 `fetch failed` 而 curl 正常，是代理环境干扰 undici，改用 17.2 的 REST API 方式。
+
+### 17.4 方式三：Git 集成
+
+1. Dashboard → Workers & Pages → Create → Connect to Git
+2. 选仓库 `a8219/fanqiedownloader`，Root directory 填 `workers`
+3. Settings → Variables 加 `TG_BOT_TOKEN`
+4. Save and Deploy
+
+之后 `git push` 到 `main` 自动部署。
+
+## 18. Workers 平台限制与应对
+
+| 限制 | 免费版 | Worker 的应对 |
+|---|---|---|
+| 单请求子请求数 | 50 | 每轮最多 45 章（45 reader + 1 TG） |
+| 单请求 wall clock | 30 秒 | DO 每轮 1 秒内完成 |
+| Durable Object | 100 万请求/月 | 987 章约 22 次 |
+| KV 读 | 10 万/天 | 可选，仅 update 用 |
+| KV 写 | 1000/天 | 987 章约 66 写 |
+| Cron | 1440 次/天 | 每分钟一次够用 |
+| TG 上传 | 50 MB | 已加 45 MB 截断保护 |
+
+核心设计：把「抓完整本」拆成多次独立请求，每次控制在 50 子请求以内。
+
+## 19. 实测记录（2026-10-24 线上）
+
+| 测试 | 结果 |
+|---|---|
+| 根路由 | 11 个端点 + `font_map_entries: 362` |
+| `/api/detail?book_id=<短链>` | `我操作的少女正在成为旧日之主 / 陷阵营营长 / 503 章` |
+| `/api/detail` 作者+封面 | `九棂` + `https://p6-novel-sign.byteimg.com/...` |
+| `/api/directory` | 503 条，正序 |
+| `/api/content` | PUA 残留 0 |
+| `/api/download count=2` | `total: 987, next: 2, PUA 残留 0` |
+| `/api/export format=txt` | `len: 5645, next: 2` |
+| `/api/export format=html` | `<section>` 片段，3410 字符 |
+| `/api/export format=epub` | `chapters: 1`，xhtml 完整 |
+| `/api/export/zip format=txt` | 16524 字节，Python zipfile 验证通过 |
+| `/api/export/zip format=html` | 3 个文件（index + 2 章） |
+| `/api/update` | `total: 503, last_seen: 0, has_kv: false` |
+| `/api/search` | `501` + 明确提示（预期降级） |
+| `/api/detail book_id=abc` | `400` 参数校验 |
+| `/api/detail book_id=不存在` | `502` 上游 404 透传 |
+| TG webhook | `Webhook was set`，`last_error: (无)` |
+| DO 命名空间 | `FanqieJob / cd1fe7ef962a4592a4008de77ddfe4dc` |
+
+## 20. 系统提示词
+
+如果你想让 AI 助手（如 DeepSeek / ChatGPT）直接接手这个项目，把下面这段作为系统提示词发过去：
+
+~~~text
+你是本仓库 workers/ 目录的维护者。这是一个部署在 Cloudflare Workers 上的番茄小说下载器。
+
+事实基线（已线上验证，勿重复验证）：
+1. Worker 地址 https://fanqie-downloader.3942369144a.workers.dev
+2. 数据来源是网页回退，不依赖官方移动端 API 签名
+3. libmetasec_ml.so 只导出 JNI_OnLoad，X-Gorgon/X-Argus/X-Ladon 走 JNI 动态注册，纯 JS/WASM 无法还原
+4. 字体映射 362 条已内联，跨书通用，解码后 PUA 残留 0
+5. Durable Object FanqieJob 已上线，namespace_id cd1fe7ef962a4592a4008de77ddfe4dc
+
+更新 Worker 的正确方式（REST API，不要用 wrangler，容器内 wrangler 会 fetch failed）：
+- metadata.json 用 exports 字段，不要用 migrations（重复声明报 10074）
+- PUT /accounts/<ACCOUNT_ID>/workers/scripts/fanqie-downloader
+  - multipart: metadata=@metadata.json, worker.js=@worker.js
+- 更新后 sleep 6 秒再验证，边缘有传播延迟
+
+硬约束：
+- 免费版单请求 50 子请求，每轮最多 45 章
+- TG 单文件 50MB，已加 45MB 截断
+- KV 单 value 25MB
+- 搜索端点 fanqienovel.com/search 返回 404，必须配 FANQIE_PROXY_API
+
+改代码前先读 worker.js 第 1-80 行的 parseBookId 和 FONT_MAP，那是核心。
+~~~
+
+---
+
+**维护记录**
+
+| 日期 | 变更 |
+|---|---|
+| 2026-10-24 | 首次部署，HTTP API + DO + TG Bot 上线 |
+| 2026-10-24 | 支持长域名短链（changdunovel.com/t/） |
+| 2026-10-24 | 新增 /api/export（txt/html/epub）、/api/export/zip、/api/update |
+| 2026-10-24 | detail 补充 author/cover（ld+json） |
