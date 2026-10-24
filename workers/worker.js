@@ -427,17 +427,18 @@ async function hExport(env, book_id, format, start, count) {
   const slice = lists.slice(s, s + n);
   if (!slice.length) return json({ code: 416, message: "range out of bounds", total }, 416);
 
-  const parts = await fetchChaptersParallel(env, slice, 15);
+  const parts = await fetchChaptersParallel(env, slice, 10);
   const tail = s + slice.length < total ? s + slice.length : null;
+  const texts = parts.map((p) => p.text);
 
   if (format === "txt") {
-    return json({ code: 200, format, book_id, book_name: bookName, total, start: s, count: slice.length, next: tail, text: parts.join("\n\n") });
+    return json({ code: 200, format, book_id, book_name: bookName, total, start: s, count: slice.length, next: tail, text: texts.join("\n\n") });
   }
 
   // html / epub：本批生成片段，客户端拼接或服务端最终打包
   if (format === "html") {
     const body = slice.map((it, i) => {
-      const raw = parts[i] || "";
+      const raw = (parts[i] && parts[i].text) || "";
       const title = it.title || raw.split("\n")[0].replace(/^##\s*/, "") || it.item_id;
       const content = raw.replace(/^##[^\n]*\n+/, "").split("\n").map((l) => `<p>${escHtml(l)}</p>`).join("\n");
       return `<section id="c_${it.item_id}"><h2>${escHtml(title)}</h2>${content}</section>`;
@@ -447,7 +448,7 @@ async function hExport(env, book_id, format, start, count) {
 
   // epub：返回本批 xhtml 片段，最终由 /api/export/final 或 DO 打包
   const chapters = slice.map((it, i) => {
-    const raw = parts[i] || "";
+    const raw = (parts[i] && parts[i].text) || "";
     const title = it.title || it.item_id;
     const content = raw.replace(/^##[^\n]*\n+/, "").split("\n").map((l) => `<p>${escHtml(l)}</p>`).join("\n");
     return { id: it.item_id, title, xhtml: `<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/><title>${escHtml(title)}</title></head><body><h2>${escHtml(title)}</h2>${content}</body></html>` };
@@ -502,13 +503,14 @@ async function hExportZip(env, book_id, format, start, count) {
   const slice = lists.slice(s, s + n);
   if (!slice.length) return json({ code: 416, message: "range out of bounds", total }, 416);
 
-  const parts = await fetchChaptersParallel(env, slice, 15);
+  const parts = await fetchChaptersParallel(env, slice, 10);
   const tail = s + slice.length < total ? s + slice.length : null;
+  const texts = parts.map((p) => p.text);
   const safe = bookName.replace(/[<>:"/\\|?*]/g, "_");
 
   const files = [];
   if (format === "txt") {
-    const body = parts.join("\n\n");
+    const body = texts.join("\n\n");
     files.push({ name: `${safe}_${s + 1}-${s + slice.length}.txt`, data: `\uFEFF${body}` });
   } else {
     files.push({
@@ -516,7 +518,7 @@ async function hExportZip(env, book_id, format, start, count) {
       data: `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(bookName)}</title></head><body><h1>${escHtml(bookName)}</h1><p>第 ${s + 1} - ${s + slice.length} 章 / 共 ${total} 章</p></body></html>`,
     });
     slice.forEach((it, i) => {
-      const raw = parts[i] || "";
+      const raw = (parts[i] && parts[i].text) || "";
       const title = it.title || it.item_id;
       const content = raw.replace(/^##[^\n]*\n+/, "").split("\n").map((l) => `<p>${escHtml(l)}</p>`).join("\n");
       files.push({
@@ -584,15 +586,25 @@ async function fetchChaptersParallel(env, items, concurrency) {
   for (let i = 0; i < items.length; i += concurrency) {
     const batch = items.slice(i, i + concurrency);
     const rs = await Promise.all(batch.map(async (it) => {
-      try {
-        const cj = await (await hContent(env, String(it.item_id))).json();
-        const title = it.title || cj?.data?.title || it.item_id;
-        return `## ${title}\n\n${cj?.data?.content || "[获取失败]"}`;
-      } catch (e) {
-        return `## ${it.item_id}\n\n[获取失败: ${String(e)}]`;
+      const itemId = String(it.item_id);
+      let lastErr = "";
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const cj = await (await hContent(env, itemId)).json();
+          if (cj && cj.code === 200 && cj.data && cj.data.content) {
+            const title = it.title || cj.data.title || itemId;
+            return { id: itemId, title, ok: true, text: `## ${title}\n\n${cj.data.content}` };
+          }
+          lastErr = (cj && cj.message) || "empty content";
+        } catch (e) {
+          lastErr = String(e);
+        }
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
       }
+      return { id: itemId, title: it.title || itemId, ok: false, text: `## ${it.title || itemId}\n\n[获取失败: ${lastErr}]` };
     }));
     out.push(...rs);
+    if (i + concurrency < items.length) await new Promise((r) => setTimeout(r, 150));
   }
   return out;
 }
@@ -664,8 +676,8 @@ async function tgHandleUpdate(env, token, update, origin) {
   await tgSend(token, chatId, `《${bookName}》共 ${total} 章，开始下载前 ${n} 章...`);
 
   const slice = lists.slice(0, n);
-  const parts = await fetchChaptersParallel(env, slice, 15);
-  let txt = parts.join("\n\n");
+  const parts = await fetchChaptersParallel(env, slice, 10);
+  let txt = parts.map((p) => p.text).join("\n\n");
   const MAX_BYTES = 45 * 1024 * 1024;
   let truncated = false;
   if (new TextEncoder().encode(txt).length > MAX_BYTES) {
@@ -755,13 +767,34 @@ async function handleCron(env) {
   job.cursor = end;
 
   if (job.cursor >= job.total) {
-    let txt = job.chunks.join("\n\n");
+    const failedIdxs = job.chunks.map((c, i) => (c && c.ok === false) ? i : -1).filter((i) => i >= 0);
+    if (failedIdxs.length > 0 && failedIdxs.length <= 40) {
+      const retryItems = failedIdxs.map((i) => {
+        const cid = job.chunks[i].id;
+        return job.lists.find((l) => String(l.item_id) === cid) || { item_id: cid, title: cid };
+      });
+      try {
+        const retried = await fetchChaptersParallel(env, retryItems, 5);
+        for (let k = 0; k < retried.length; k++) {
+          if (retried[k].ok) job.chunks[failedIdxs[k]] = retried[k];
+        }
+      } catch (e) {}
+    }
+    let txt = job.chunks.map((c) => (c && c.text) || "").join("\n\n");
+    const stillFailed = job.chunks.filter((c) => c && c.ok === false).length;
     const MAX_BYTES = 45 * 1024 * 1024;
+    let truncated = false;
     if (new TextEncoder().encode(txt).length > MAX_BYTES) {
       txt = txt.slice(0, Math.floor(txt.length * MAX_BYTES / new TextEncoder().encode(txt).length));
+      truncated = true;
     }
-    await tgSendDoc(token, job.chatId, `${job.bookName}.txt`, txt, `全书 ${job.total} 章`);
-    await tgSend(token, job.chatId, `《${job.bookName}》全部 ${job.total} 章已发送完毕`);
+    const cap = `全书 ${job.total} 章`
+      + (stillFailed > 0 ? `（${stillFailed} 章获取失败）` : "")
+      + (truncated ? "（已截断至 45MB）" : "");
+    await tgSendDoc(token, job.chatId, `${job.bookName}.txt`, txt, cap);
+    await tgSend(token, job.chatId,
+      `《${job.bookName}》全部 ${job.total} 章已发送完毕`
+      + (stillFailed > 0 ? `，其中 ${stillFailed} 章补抓后仍失败` : ""));
     await env.FANQIE_KV.delete(jobKey);
     pending.shift();
     await env.FANQIE_KV.put("jobs:pending", JSON.stringify(pending));
@@ -806,16 +839,33 @@ export class FanqieJob {
 
     let parts = [];
     try {
-      parts = await fetchChaptersParallel(this.env, slice, 15);
+      parts = await fetchChaptersParallel(this.env, slice, 10);
     } catch (e) {
-      parts = slice.map((it) => `## ${it.title || it.item_id}\n\n[获取失败: ${String(e)}]`);
+      parts = slice.map((it) => ({ id: String(it.item_id), title: it.title || it.item_id, ok: false, text: `## ${it.title || it.item_id}\n\n[获取失败: ${String(e)}]` }));
     }
 
+    job.chunks = job.chunks || [];
     job.chunks.push(...parts);
     job.cursor = end;
 
     if (job.cursor >= job.total) {
-      let txt = job.chunks.join("\n\n");
+      // 补抓失败章节（最多 40 章，避免超子请求上限）
+      const failedIdxs = job.chunks.map((c, i) => (c && c.ok === false) ? i : -1).filter((i) => i >= 0);
+      if (failedIdxs.length > 0 && failedIdxs.length <= 40) {
+        const retryItems = failedIdxs.map((i) => {
+          const cid = job.chunks[i].id;
+          return job.lists.find((l) => String(l.item_id) === cid) || { item_id: cid, title: cid };
+        });
+        try {
+          const retried = await fetchChaptersParallel(this.env, retryItems, 5);
+          for (let k = 0; k < retried.length; k++) {
+            if (retried[k].ok) job.chunks[failedIdxs[k]] = retried[k];
+          }
+        } catch (e) {}
+      }
+
+      let txt = job.chunks.map((c) => (c && c.text) || "").join("\n\n");
+      const stillFailed = job.chunks.filter((c) => c && c.ok === false).length;
       const MAX_BYTES = 45 * 1024 * 1024;
       let truncated = false;
       if (new TextEncoder().encode(txt).length > MAX_BYTES) {
@@ -823,9 +873,13 @@ export class FanqieJob {
         truncated = true;
       }
       if (token) {
-        await tgSendDoc(token, job.chatId, `${job.bookName}.txt`, txt,
-          `全书 ${job.total} 章` + (truncated ? "（已截断至 45MB）" : ""));
-        await tgSend(token, job.chatId, `《${job.bookName}》全部 ${job.total} 章已发送完毕`);
+        const cap = `全书 ${job.total} 章`
+          + (stillFailed > 0 ? `（${stillFailed} 章获取失败）` : "")
+          + (truncated ? "（已截断至 45MB）" : "");
+        await tgSendDoc(token, job.chatId, `${job.bookName}.txt`, txt, cap);
+        await tgSend(token, job.chatId,
+          `《${job.bookName}》全部 ${job.total} 章已发送完毕`
+          + (stillFailed > 0 ? `，其中 ${stillFailed} 章补抓后仍失败` : ""));
       }
       await this.state.storage.deleteAll();
       return;
