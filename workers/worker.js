@@ -32,16 +32,177 @@ async function fetchT(url, opts = {}, ms = 15000) {
   finally { clearTimeout(t); }
 }
 
-function parseBookId(v) {
+async function parseBookId(v) {
   if (!v) return "";
   let s = String(v).trim();
-  if (s.startsWith("http")) {
-    s = s.split("?")[0].split("#")[0].replace(/\/$/, "");
-    const parts = s.split("/");
-    s = parts[parts.length - 1];
+  if (/^\d{10,}$/.test(s)) return s;
+
+  // changdunovel.com/t/xxx/ 短链接：读 302 Location 里的 book_id
+  if (/changdunovel\.com\/t\//.test(s)) {
+    try {
+      const r = await fetch(s, { redirect: "manual", headers: { "user-agent": UA } });
+      const loc = r.headers.get("location") || "";
+      const m1 = loc.match(/[?&]book_id=(\d{10,})/);
+      if (m1) return m1[1];
+      const m2 = loc.match(/\/(?:page|reader)\/(\d{10,})/);
+      if (m2) return m2[1];
+      // 退路：follow 一次拿落点
+      const r2 = await fetch(s, { redirect: "follow", headers: { "user-agent": UA } });
+      const m3 = r2.url.match(/[?&]book_id=(\d{10,})/);
+      if (m3) return m3[1];
+    } catch (e) {}
+    return "";
   }
-  return /^\d{10,}$/.test(s) ? s : "";
+
+  // share-v2.html?book_id=xxx
+  if (/changdunovel\.com\/wap\/share-v2\.html/.test(s)) {
+    try {
+      const bid = new URL(s).searchParams.get("book_id");
+      if (bid && /^\d{10,}$/.test(bid)) return bid;
+    } catch (e) {}
+  }
+
+  // book-share?book_id=xxx
+  if (/changdunovel\.com\/ug\/pages\/book-share/.test(s)) {
+    try {
+      const bid = new URL(s).searchParams.get("book_id");
+      if (bid && /^\d{10,}$/.test(bid)) return bid;
+    } catch (e) {}
+  }
+
+  // fanqienovel.com/page/xxx 或 /reader/xxx
+  const m = s.match(/\/(?:page|reader)\/(\d{10,})/);
+  if (m) return m[1];
+
+  return "";
 }
+
+
+// ---------- 最小 ZIP 生成器（store，无压缩） ----------
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function makeZip(files) {
+  const enc = new TextEncoder();
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  const now = new Date();
+  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
+  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
+
+  for (const f of files) {
+    const nameBytes = enc.encode(f.name);
+    const data = typeof f.data === "string" ? enc.encode(f.data) : f.data;
+    const crc = crc32(data);
+    const size = data.length;
+
+    const lh = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(lh.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    lh.set(nameBytes, 30);
+
+    locals.push(lh, data);
+
+    const ch = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(ch.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    ch.set(nameBytes, 46);
+    centrals.push(ch);
+
+    offset += lh.length + size;
+  }
+
+  const cdStart = offset;
+  let cdSize = 0;
+  for (const c of centrals) cdSize += c.length;
+
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, cdStart, true);
+  ev.setUint16(20, 0, true);
+
+  const total = offset + cdSize + 22;
+  const out = new Uint8Array(total);
+  let p = 0;
+  for (const part of locals) { out.set(part, p); p += part.length; }
+  for (const c of centrals) { out.set(c, p); p += c.length; }
+  out.set(eocd, p);
+  return out;
+}
+
+// ---------- ld+json 抓作者/封面 ----------
+function extractLdJson(html) {
+  const out = {};
+  const re = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    try {
+      const j = JSON.parse(m[1]);
+      const arr = Array.isArray(j) ? j : [j];
+      for (const x of arr) {
+        if (x.author && !out.author) {
+          const a = Array.isArray(x.author) ? x.author[0] : x.author;
+          out.author = a?.name || "";
+        }
+        if (x.image && !out.cover) {
+          out.cover = Array.isArray(x.image) ? x.image[0] : x.image;
+        }
+        if (x.headline && !out.headline) out.headline = x.headline;
+      }
+    } catch (e) {}
+  }
+  return out;
+}
+
+const escHtml = (s) => String(s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
 
 function decodeFont(s) {
   let out = "";
@@ -125,7 +286,7 @@ async function hSearch(env, key) {
 
 // ---------- 详情 ----------
 async function hDetail(env, book_id) {
-  book_id = parseBookId(book_id);
+  book_id = await parseBookId(book_id);
   if (!book_id) return json({ code: 400, message: "book_id or book URL required" }, 400);
   const r = await proxyGet(env, "/detail", { book_id });
   if (r.ok) return json({ code: 200, from: r.from, data: r.data });
@@ -134,17 +295,19 @@ async function hDetail(env, book_id) {
     const st = parseState(html);
     const p = st?.page || {};
     if (!p.bookName) return json({ code: 404, from: "web", message: "book not found" }, 404);
+    const ld = extractLdJson(html);
     return json({
       code: 200, from: "web",
       data: {
         book_id: String(p.bookId || book_id),
         book_name: p.bookName,
-        author: p.author || "",
+        author: p.author || ld.author || "",
         abstract: p.abstract || "",
         status: String(p.status ?? ""),
         word_number: p.wordNumber ?? 0,
         chapter_total: p.chapterTotal ?? (p.itemIds || []).length,
         last_chapter_title: p.lastChapterTitle || "",
+        cover: ld.cover || "",
       },
     });
   } catch (e) { return json({ code: 502, message: String(e) }, 502); }
@@ -152,7 +315,7 @@ async function hDetail(env, book_id) {
 
 // ---------- 目录 ----------
 async function hDirectory(env, book_id) {
-  book_id = parseBookId(book_id);
+  book_id = await parseBookId(book_id);
   if (!book_id) return json({ code: 400, message: "book_id or book URL required" }, 400);
   const r = await proxyGet(env, "/directory", { book_id });
   if (r.ok) return json({ code: 200, from: r.from, data: r.data });
@@ -187,7 +350,7 @@ async function hDirectory(env, book_id) {
 
 // ---------- 正文 ----------
 async function hContent(env, item_id) {
-  item_id = parseBookId(item_id);
+  item_id = await parseBookId(item_id);
   if (!item_id) return json({ code: 400, message: "item_id or reader URL required" }, 400);
   const r = await proxyGet(env, "/content", { tab: "小说", item_id });
   if (r.ok) return json({ code: 200, from: r.from, data: r.data });
@@ -215,7 +378,7 @@ async function hContent(env, item_id) {
 
 // ---------- 分段下载 (规避 Workers 子请求上限) ----------
 async function hDownload(env, book_id, start, count) {
-  book_id = parseBookId(book_id);
+  book_id = await parseBookId(book_id);
   if (!book_id) return json({ code: 400, message: "book_id or book URL required" }, 400);
   const dj = await (await hDirectory(env, book_id)).json();
   if (dj.code !== 200) return json(dj, dj.code || 500);
@@ -236,6 +399,141 @@ async function hDownload(env, book_id, start, count) {
     total: lists.length, start: s, count: slice.length,
     next: s + slice.length < lists.length ? s + slice.length : null,
     text: parts.join("\n\n"),
+  });
+}
+
+
+// ---------- 整本导出（txt / html / epub，分批） ----------
+async function hExport(env, book_id, format, start, count) {
+  book_id = await parseBookId(book_id);
+  if (!book_id) return json({ code: 400, message: "book_id or book URL required" }, 400);
+  format = (format || "txt").toLowerCase();
+  if (!["txt", "html", "epub"].includes(format)) {
+    return json({ code: 400, message: "format must be txt|html|epub" }, 400);
+  }
+
+  const dj = await (await hDirectory(env, book_id)).json();
+  if (dj.code !== 200) return json(dj, dj.code || 500);
+  const lists = dj.data.lists || [];
+  const bookName = dj.data.book_name || book_id;
+  const total = lists.length;
+
+  const s = Math.max(0, parseInt(start || "0", 10) || 0);
+  const n = Math.min(45, Math.max(1, parseInt(count || "20", 10) || 20));
+  const slice = lists.slice(s, s + n);
+  if (!slice.length) return json({ code: 416, message: "range out of bounds", total }, 416);
+
+  const parts = await fetchChaptersParallel(env, slice, 15);
+  const tail = s + slice.length < total ? s + slice.length : null;
+
+  if (format === "txt") {
+    return json({ code: 200, format, book_id, book_name: bookName, total, start: s, count: slice.length, next: tail, text: parts.join("\n\n") });
+  }
+
+  // html / epub：本批生成片段，客户端拼接或服务端最终打包
+  if (format === "html") {
+    const body = slice.map((it, i) => {
+      const raw = parts[i] || "";
+      const title = it.title || raw.split("\n")[0].replace(/^##\s*/, "") || it.item_id;
+      const content = raw.replace(/^##[^\n]*\n+/, "").split("\n").map((l) => `<p>${escHtml(l)}</p>`).join("\n");
+      return `<section id="c_${it.item_id}"><h2>${escHtml(title)}</h2>${content}</section>`;
+    }).join("\n");
+    return json({ code: 200, format, book_id, book_name: bookName, total, start: s, count: slice.length, next: tail, html: body });
+  }
+
+  // epub：返回本批 xhtml 片段，最终由 /api/export/final 或 DO 打包
+  const chapters = slice.map((it, i) => {
+    const raw = parts[i] || "";
+    const title = it.title || it.item_id;
+    const content = raw.replace(/^##[^\n]*\n+/, "").split("\n").map((l) => `<p>${escHtml(l)}</p>`).join("\n");
+    return { id: it.item_id, title, xhtml: `<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/><title>${escHtml(title)}</title></head><body><h2>${escHtml(title)}</h2>${content}</body></html>` };
+  });
+  return json({ code: 200, format, book_id, book_name: bookName, total, start: s, count: slice.length, next: tail, chapters });
+}
+
+// ---------- 更新检查（对比 KV 记录的章节数） ----------
+async function hUpdateCheck(env, book_id) {
+  book_id = await parseBookId(book_id);
+  if (!book_id) return json({ code: 400, message: "book_id or book URL required" }, 400);
+
+  const dj = await (await hDirectory(env, book_id)).json();
+  if (dj.code !== 200) return json(dj, dj.code || 500);
+  const total = dj.data.chapter_total;
+  const bookName = dj.data.book_name;
+
+  let lastSeen = 0;
+  if (env?.FANQIE_KV) {
+    const v = await env.FANQIE_KV.get(`record:${book_id}`);
+    lastSeen = parseInt(v || "0", 10) || 0;
+    if (total > lastSeen) await env.FANQIE_KV.put(`record:${book_id}`, String(total));
+  }
+
+  const newCount = lastSeen ? Math.max(0, total - lastSeen) : total;
+  return json({
+    code: 200, book_id, book_name: bookName,
+    total, last_seen: lastSeen, new_chapters: newCount,
+    has_kv: !!env?.FANQIE_KV,
+    next_start: lastSeen || 0,
+  });
+}
+
+
+// ---------- 分批打包 zip（txt/html） ----------
+async function hExportZip(env, book_id, format, start, count) {
+  book_id = await parseBookId(book_id);
+  if (!book_id) return json({ code: 400, message: "book_id or book URL required" }, 400);
+  format = (format || "txt").toLowerCase();
+  if (!["txt", "html"].includes(format)) {
+    return json({ code: 400, message: "format must be txt|html" }, 400);
+  }
+
+  const dj = await (await hDirectory(env, book_id)).json();
+  if (dj.code !== 200) return json(dj, dj.code || 500);
+  const lists = dj.data.lists || [];
+  const bookName = dj.data.book_name || book_id;
+  const total = lists.length;
+
+  const s = Math.max(0, parseInt(start || "0", 10) || 0);
+  const n = Math.min(40, Math.max(1, parseInt(count || "20", 10) || 20));
+  const slice = lists.slice(s, s + n);
+  if (!slice.length) return json({ code: 416, message: "range out of bounds", total }, 416);
+
+  const parts = await fetchChaptersParallel(env, slice, 15);
+  const tail = s + slice.length < total ? s + slice.length : null;
+  const safe = bookName.replace(/[<>:"/\\|?*]/g, "_");
+
+  const files = [];
+  if (format === "txt") {
+    const body = parts.join("\n\n");
+    files.push({ name: `${safe}_${s + 1}-${s + slice.length}.txt`, data: `\uFEFF${body}` });
+  } else {
+    files.push({
+      name: "index.html",
+      data: `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(bookName)}</title></head><body><h1>${escHtml(bookName)}</h1><p>第 ${s + 1} - ${s + slice.length} 章 / 共 ${total} 章</p></body></html>`,
+    });
+    slice.forEach((it, i) => {
+      const raw = parts[i] || "";
+      const title = it.title || it.item_id;
+      const content = raw.replace(/^##[^\n]*\n+/, "").split("\n").map((l) => `<p>${escHtml(l)}</p>`).join("\n");
+      files.push({
+        name: `chapter_${String(s + i + 1).padStart(5, "0")}_${it.item_id}.html`,
+        data: `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escHtml(title)}</title></head><body><h2>${escHtml(title)}</h2>${content}</body></html>`,
+      });
+    });
+  }
+
+  const zip = makeZip(files);
+  const fname = `${safe}_${s + 1}-${s + slice.length}.zip`;
+  return new Response(zip, {
+    headers: {
+      "content-type": "application/zip",
+      "content-disposition": `attachment; filename="${fname}"`,
+      "x-total": String(total),
+      "x-start": String(s),
+      "x-count": String(slice.length),
+      "x-next": tail === null ? "" : String(tail),
+      ...CORS,
+    },
   });
 }
 
@@ -557,6 +855,9 @@ export default {
           "/api/directory?book_id=",
           "/api/content?item_id=",
           "/api/download?book_id=&start=0&count=20",
+          "/api/export?book_id=&format=txt|html|epub&start=0&count=20",
+          "/api/export/zip?book_id=&format=txt|html&start=0&count=20",
+          "/api/update?book_id=",
           "/api/config",
           "POST /tg/webhook",
           "GET /tg/setup",
@@ -569,6 +870,9 @@ export default {
       if (p === "/api/directory") return hDirectory(env, u.searchParams.get("book_id") || "");
       if (p === "/api/content") return hContent(env, u.searchParams.get("item_id") || "");
       if (p === "/api/download") return hDownload(env, u.searchParams.get("book_id") || "", u.searchParams.get("start"), u.searchParams.get("count"));
+      if (p === "/api/export") return hExport(env, u.searchParams.get("book_id") || "", u.searchParams.get("format"), u.searchParams.get("start"), u.searchParams.get("count"));
+      if (p === "/api/update") return hUpdateCheck(env, u.searchParams.get("book_id") || "");
+      if (p === "/api/export/zip") return hExportZip(env, u.searchParams.get("book_id") || "", u.searchParams.get("format"), u.searchParams.get("start"), u.searchParams.get("count"));
       if (p === "/api/config") return hConfig(request, env);
       if (p === "/tg/webhook" && request.method === "POST") return hTelegramWebhook(request, env, ctx);
       if (p === "/tg/setup") return hTelegramSetup(request, env);
