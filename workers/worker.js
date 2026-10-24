@@ -37,6 +37,10 @@ async function parseBookId(v) {
   let s = String(v).trim();
   if (/^\d{10,}$/.test(s)) return s;
 
+  // 从混杂文本中提取 URL（例如「推荐一部好书《…》https://…」）
+  const urlM = s.match(/https?:\/\/[^\s"'<>）)]+/);
+  if (urlM) s = urlM[0];
+
   // changdunovel.com/t/xxx/ 短链接：读 302 Location 里的 book_id
   if (/changdunovel\.com\/t\//.test(s)) {
     try {
@@ -607,7 +611,7 @@ async function tgHandleUpdate(env, token, update, origin) {
     return;
   }
 
-  const bookId = parseBookId(text);
+  const bookId = await parseBookId(text);
   if (!bookId) {
     await tgSend(token, chatId, "无法识别，请发送番茄小说链接或 15 位以上 book_id");
     return;
