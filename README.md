@@ -192,3 +192,57 @@ Before using this program, please ensure compliance with relevant laws and regul
 
 本仓库遵循 [AGPL-3.0](https://github.com/ying-ck/fanqienovel-downloader?tab=AGPL-3.0-1-ov-file)。作为上游的衍生作品，本仓库同样使用 AGPL-3.0 开源，使用本仓库源码时请注明来源（上游 ying-ck/fanqienovel-downloader 与本衍生仓库），并同样使用此协议。
 
+# 免责声明
+
+## 一、用途限定
+
+本项目（含源代码、文档、示例及衍生内容，下称"本项目"）仅供**个人技术学习、研究与交流**使用，不构成任何产品或服务，亦不附带任何形式的技术支持、可用性保证或更新承诺。
+
+## 二、合法使用义务
+
+1. 使用者应在使用前自行确认其行为符合**所在地法律法规**及所涉第三方的服务条款。
+2. 使用者不得将本项目用于任何违法、侵权或损害他人合法权益的用途。
+3. 使用者不得将本项目用于商业用途、二次售卖、付费分发、代运营或任何形式的营利活动。
+4. 使用者不得对本项目进行任何形式的公开宣传、推广、引流或社群扩散。
+
+## 三、使用风险自担
+
+1. 本项目按"现状"（AS IS）提供，不作任何明示或默示担保，包括但不限于适销性、特定用途适用性、无侵权及无错误的担保。
+2. 因使用、无法使用、误用或依赖本项目而产生的**任何直接、间接、附带、特殊或后果性损失**（包括但不限于数据丢失、设备损坏、账号封禁、服务中断、法律纠纷、经济损失），**均由使用者自行承担**。
+3. 使用者与任何第三方之间因使用本项目产生的争议、索赔或诉讼，与作者无关，由使用者自行处理并承担全部责任。
+
+## 四、责任限制
+
+在适用法律允许的最大范围内，**本项目的作者、贡献者及分发者不对任何因本项目引起的或与之相关的索赔、损害或其他责任承担责任**，无论该责任基于合同、侵权、严格责任或其他法理，亦无论是否已被告知该等损害的可能性。
+
+## 五、第三方内容与链接
+
+本项目可能涉及或链接至第三方网站、接口、内容或服务。作者对该等第三方的合法性、准确性、可用性及安全性不作任何保证，亦不承担任何责任。使用者访问或使用第三方内容的风险由自身承担。
+
+## 六、知识产权
+
+本项目所涉及的一切第三方商标、内容、数据及知识产权归其各自权利人所有。本项目不主张对上述内容享有任何权利。若权利人认为本项目内容侵犯其权益，请联系作者，作者将在核实后及时处理。
+
+## 七、条款变更与终止
+
+作者保留**随时修改本声明、变更或终止本项目、删除仓库及停止维护**的权利，无需事先通知，亦不因此承担任何责任。
+
+## 八、接受条款
+
+**下载、克隆、复制、编译、部署或以任何方式使用本项目，即视为您已阅读、理解并完全同意本声明全部条款。** 若您不同意其中任何一条，请立即停止使用并删除本项目的全部副本。
+
+# Disclaimer
+
+This project is provided **for personal study and research purposes only**. It is not a product or service, and comes with no warranty of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, and non-infringement.
+
+**You are solely responsible** for ensuring that your use complies with all applicable laws and regulations in your jurisdiction, as well as any third-party terms of service. Commercial use, resale, paid redistribution, public promotion, and any unlawful use are prohibited.
+
+The project is provided **"AS IS"**, without warranty of any kind. **In no event shall the authors, contributors, or distributors be liable for any claim, damages, or other liability**, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the project or the use or other dealings in the project. This includes, without limitation, data loss, device damage, account suspension, service interruption, legal disputes, and financial loss.
+
+The authors make no representations or warranties regarding any third-party content, links, APIs, or services referenced by this project, and accept no liability for them.
+
+The authors reserve the right to modify this disclaimer, change or discontinue the project, or remove the repository at any time without prior notice.
+
+**By downloading, cloning, copying, compiling, deploying, or otherwise using this project, you acknowledge that you have read, understood, and agree to be bound by this disclaimer in its entirety.** If you do not agree, you must immediately stop using the project and delete all copies.
+
+本免责声明与仓库内 LICENSE 并存；两者如有冲突，以更严格者为准。
