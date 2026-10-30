@@ -25,3 +25,13 @@ crons = ["* * * * *"]
 # 可选：默认代理
 # [vars]
 # FANQIE_PROXY_API = "https://your-proxy.example.com/api"
+
+# ========== 环境变量说明（建议用 wrangler secret put 或控制台设置） ==========
+# TG_BOT_TOKEN            必填  Telegram Bot Token
+# FANQIE_ADMIN_USERNAME   必填  管理员账号
+# FANQIE_ADMIN_PASSWORD   必填  管理员密码
+# FANQIE_ONLINE_READ      选填  1=启用在线阅读页 /read，0=禁用（默认 0）
+# FANQIE_COOKIE           选填  番茄登录 Cookie
+# FANQIE_PROXY_API        选填  代理 API 基址
+# FANQIE_USE_PROXY        选填  1=启用代理池
+# TG_WEBHOOK_SECRET       选填  Telegram Webhook 校验串
