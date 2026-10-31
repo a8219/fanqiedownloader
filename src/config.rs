@@ -18,7 +18,10 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         fn opt(k: &str) -> Option<String> {
-            env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+            env::var(k)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
         }
         Self {
             bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into()),
@@ -31,7 +34,9 @@ impl Config {
             tg_bot_token: opt("TG_BOT_TOKEN"),
             admin_username: opt("FANQIE_ADMIN_USERNAME"),
             admin_password: opt("FANQIE_ADMIN_PASSWORD"),
-            online_read: env::var("FANQIE_ONLINE_READ").map(|v| v != "0").unwrap_or(true),
+            online_read: env::var("FANQIE_ONLINE_READ")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             upstream_url: opt("WORKER_UPSTREAM_URL").map(|v| v.trim_end_matches('/').to_string()),
             base_url: opt("BASE_URL").map(|v| v.trim_end_matches('/').to_string()),
         }

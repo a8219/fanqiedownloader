@@ -9,7 +9,9 @@ pub struct ProtobufWriter {
 
 impl ProtobufWriter {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(256) }
+        Self {
+            buf: Vec::with_capacity(256),
+        }
     }
 
     pub fn varint(&mut self, field: u32, value: u64) -> &mut Self {

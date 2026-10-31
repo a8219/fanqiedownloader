@@ -77,7 +77,10 @@ impl DeviceClient {
         let resp = self
             .http
             .post(REGISTER_URL)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream; tt-data=a")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/octet-stream; tt-data=a",
+            )
             .header(reqwest::header::USER_AGENT, "okhttp/4.10.0")
             .body(ciphertext)
             .send()
@@ -143,7 +146,10 @@ impl DeviceClient {
             .header("x-ladon", &sig.x_ladon)
             .header("x-khronos", &sig.x_khronos)
             .header(reqwest::header::USER_AGENT, APP_UA)
-            .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
             .header(reqwest::header::CONTENT_ENCODING, "gzip")
             .body(gzipped)
             .send()
@@ -160,7 +166,11 @@ impl DeviceClient {
             .ok_or_else(|| anyhow::anyhow!("registerkey: missing data.key"))?;
         let keyver = json
             .pointer("/data/keyver")
-            .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| v.to_string())
+            })
             .unwrap_or_else(|| "0".to_string());
 
         let blob = base64::engine::general_purpose::STANDARD.decode(encrypted_key)?;
@@ -205,11 +215,21 @@ impl DeviceClient {
             .get("data")
             .ok_or_else(|| anyhow::anyhow!("reader/full: missing data"))?;
 
-        let title = data.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let book_name = data.get("book_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let key_version = data
-            .get("key_version")
-            .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()));
+        let title = data
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let book_name = data
+            .get("book_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let key_version = data.get("key_version").map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string())
+        });
 
         let raw = data.get("content").and_then(|v| v.as_str()).unwrap_or("");
         if raw.is_empty() || raw == "Invalid" {

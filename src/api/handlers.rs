@@ -99,7 +99,10 @@ pub async fn api_search(State(state): State<AppState>, Query(q): Params) -> Resp
                 }))
                 .into_response()
             } else {
-                err(StatusCode::NOT_IMPLEMENTED, "search unavailable (no proxy configured)")
+                err(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "search unavailable (no proxy configured)",
+                )
             }
         }
         Err(e) => {
@@ -272,7 +275,10 @@ pub async fn api_export(State(state): State<AppState>, Query(q): Params) -> Resp
             }))
             .into_response()
         }
-        other => err(StatusCode::BAD_REQUEST, &format!("unsupported format: {other}")),
+        other => err(
+            StatusCode::BAD_REQUEST,
+            &format!("unsupported format: {other}"),
+        ),
     }
 }
 
@@ -299,7 +305,12 @@ pub async fn api_export_zip(State(state): State<AppState>, Query(q): Params) -> 
 
     let zip = match export_zip(&book_name, &chapters) {
         Ok(z) => z,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip failed: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("zip failed: {e}"),
+            )
+        }
     };
 
     let safe: String = book_name
@@ -311,11 +322,21 @@ pub async fn api_export_zip(State(state): State<AppState>, Query(q): Params) -> 
     axum::response::Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/zip")
-        .header("content-disposition", format!("attachment; filename=\"{fname}\""))
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{fname}\""),
+        )
         .header("x-total", lists.len().to_string())
         .header("x-start", start.to_string())
         .header("x-count", chapters.len().to_string())
-        .header("x-next", if end < lists.len() { end.to_string() } else { String::new() })
+        .header(
+            "x-next",
+            if end < lists.len() {
+                end.to_string()
+            } else {
+                String::new()
+            },
+        )
         .body(axum::body::Body::from(zip))
         .unwrap_or_else(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}")))
 }
@@ -334,7 +355,11 @@ pub async fn api_update(State(state): State<AppState>, Query(q): Params) -> Resp
     if total > last_seen {
         records.insert(book_id.clone(), total);
     }
-    let new_chapters = if last_seen == 0 { total } else { total.saturating_sub(last_seen) };
+    let new_chapters = if last_seen == 0 {
+        total
+    } else {
+        total.saturating_sub(last_seen)
+    };
     Json(json!({
         "code": 200, "book_id": book_id, "book_name": book_name,
         "total": total, "last_seen": last_seen, "new_chapters": new_chapters,
@@ -367,14 +392,25 @@ pub async fn list_library(State(state): State<AppState>) -> Response {
 }
 
 pub async fn add_library(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    let Some(id) = body.get("book_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+    let Some(id) = body
+        .get("book_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
         return err(StatusCode::BAD_REQUEST, "book_id required");
     };
-    state.library.write().await.insert(id.to_string(), body.clone());
+    state
+        .library
+        .write()
+        .await
+        .insert(id.to_string(), body.clone());
     Json(json!({ "code": 200, "data": body })).into_response()
 }
 
-pub async fn remove_library(State(state): State<AppState>, Path(book_id): Path<String>) -> Response {
+pub async fn remove_library(
+    State(state): State<AppState>,
+    Path(book_id): Path<String>,
+) -> Response {
     let removed = state.library.write().await.remove(&book_id).is_some();
     Json(json!({ "code": 200, "deleted": removed })).into_response()
 }
@@ -413,21 +449,30 @@ pub async fn tg_webhook(State(state): State<AppState>, body: axum::body::Bytes) 
         return err(StatusCode::BAD_REQUEST, "invalid JSON");
     };
 
-    let msg = update
-        .get("message")
-        .or_else(|| update.get("channel_post"));
+    let msg = update.get("message").or_else(|| update.get("channel_post"));
     let Some(msg) = msg else {
         return Json(json!({ "code": 200, "note": "no message" })).into_response();
     };
 
-    let Some(chat_id) = msg.get("chat").and_then(|c| c.get("id")).and_then(|i| i.as_i64()) else {
+    let Some(chat_id) = msg
+        .get("chat")
+        .and_then(|c| c.get("id"))
+        .and_then(|i| i.as_i64())
+    else {
         return Json(json!({ "code": 200, "note": "no chat id" })).into_response();
     };
     let chat_id = chat_id.to_string();
-    let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+    let text = msg
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim();
 
     let Some(bot) = TelegramBot::from_config(&state.config) else {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "TG_BOT_TOKEN not configured");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TG_BOT_TOKEN not configured",
+        );
     };
 
     if text == "/start" || text == "/help" {
@@ -447,10 +492,14 @@ pub async fn tg_webhook(State(state): State<AppState>, body: axum::body::Bytes) 
     let st = state.clone();
     let cid = chat_id.clone();
     tokio::spawn(async move {
-        let _ = bot.send_message(&cid, &format!("📥 开始处理 {book_id} ...")).await;
+        let _ = bot
+            .send_message(&cid, &format!("📥 开始处理 {book_id} ..."))
+            .await;
         match fetch_directory(&st, &book_id).await {
             Err(e) => {
-                let _ = bot.send_message(&cid, &format!("❌ 获取目录失败: {e}")).await;
+                let _ = bot
+                    .send_message(&cid, &format!("❌ 获取目录失败: {e}"))
+                    .await;
             }
             Ok((book_name, _, lists)) => {
                 if lists.is_empty() {
@@ -467,10 +516,17 @@ pub async fn tg_webhook(State(state): State<AppState>, body: axum::body::Bytes) 
                 let filename = format!("{}.txt", sanitize(&book_name));
 
                 if let Err(e) = bot
-                    .send_document(&cid, &filename, payload, &format!("《{book_name}》共 {total} 章"))
+                    .send_document(
+                        &cid,
+                        &filename,
+                        payload,
+                        &format!("《{book_name}》共 {total} 章"),
+                    )
                     .await
                 {
-                    let _ = bot.send_message(&cid, &format!("❌ 发送文件失败: {e}")).await;
+                    let _ = bot
+                        .send_message(&cid, &format!("❌ 发送文件失败: {e}"))
+                        .await;
                 }
             }
         }
@@ -484,12 +540,17 @@ pub async fn tg_setup(State(state): State<AppState>) -> Response {
         return err(StatusCode::BAD_REQUEST, "TG_BOT_TOKEN not configured");
     };
     let Some(base) = state.config.base_url.clone() else {
-        return err(StatusCode::BAD_REQUEST, "BASE_URL not configured (needed to register webhook)");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "BASE_URL not configured (needed to register webhook)",
+        );
     };
 
     let bot = TelegramBot::from_token(token);
     let hook = format!("{base}/tg/webhook");
-    let secret = std::env::var("TG_WEBHOOK_SECRET").ok().filter(|s| !s.is_empty());
+    let secret = std::env::var("TG_WEBHOOK_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     match bot.set_webhook(&hook, secret.as_deref()).await {
         Ok(()) => Json(json!({ "code": 200, "webhook": hook })).into_response(),
@@ -550,11 +611,25 @@ async fn fetch_chapter(state: &AppState, item_id: &str) -> anyhow::Result<Fetche
 
     let raw = cd.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let content = crate::font_map::decode_font(&strip_tags(raw));
-    let title = cd.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let book_name = cd.get("bookName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let title = cd
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let book_name = cd
+        .get("bookName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let truncated = content.chars().count() < 500;
 
-    Ok(FetchedChapter { title, book_name, content, truncated, source: "web" })
+    Ok(FetchedChapter {
+        title,
+        book_name,
+        content,
+        truncated,
+        source: "web",
+    })
 }
 
 async fn collect_chapters(state: &AppState, lists: &[Value]) -> Vec<ChapterText> {
@@ -574,12 +649,22 @@ async fn collect_chapters(state: &AppState, lists: &[Value]) -> Vec<ChapterText>
 
         match fetch_chapter(state, &item_id).await {
             Ok(ch) => {
-                let title = if ch.title.is_empty() { fallback_title } else { ch.title };
-                out.push(ChapterText { title, content: ch.content });
+                let title = if ch.title.is_empty() {
+                    fallback_title
+                } else {
+                    ch.title
+                };
+                out.push(ChapterText {
+                    title,
+                    content: ch.content,
+                });
             }
             Err(e) => {
                 tracing::warn!("chapter {item_id} failed: {e}");
-                out.push(ChapterText { title: fallback_title, content: "[获取失败]".into() });
+                out.push(ChapterText {
+                    title: fallback_title,
+                    content: "[获取失败]".into(),
+                });
             }
         }
     }
@@ -663,7 +748,9 @@ async fn fetch_html(state: &AppState, url: &str) -> anyhow::Result<String> {
 /// Extract `window.__INITIAL_STATE__` without a regex dependency.
 fn extract_state(html: &str) -> anyhow::Result<Value> {
     const MARKER: &str = "window.__INITIAL_STATE__=";
-    let idx = html.find(MARKER).ok_or_else(|| anyhow::anyhow!("__INITIAL_STATE__ not found"))?;
+    let idx = html
+        .find(MARKER)
+        .ok_or_else(|| anyhow::anyhow!("__INITIAL_STATE__ not found"))?;
     let rest = &html[idx + MARKER.len()..];
 
     let mut depth = 0i32;
@@ -703,9 +790,8 @@ fn extract_state(html: &str) -> anyhow::Result<Value> {
 fn strip_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
-    let mut chars = html.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in html.chars() {
         match ch {
             '<' => in_tag = true,
             '>' => in_tag = false,
@@ -719,8 +805,8 @@ fn strip_tags(html: &str) -> String {
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .replace(""", "\"")
-        .replace("'", "'")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
         .lines()
         .map(|l| l.trim_end())
         .collect::<Vec<_>>()
@@ -758,17 +844,30 @@ fn is_path_safe(c: char) -> bool {
 }
 
 fn sanitize(name: &str) -> String {
-    let s: String = name.chars().map(|c| if is_path_safe(c) { c } else { '_' }).collect();
-    if s.trim().is_empty() { "novel".into() } else { s }
+    let s: String = name
+        .chars()
+        .map(|c| if is_path_safe(c) { c } else { '_' })
+        .collect();
+    if s.trim().is_empty() {
+        "novel".into()
+    } else {
+        s
+    }
 }
 
 fn str_of(v: &Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn int_of(v: &Value, key: &str) -> i64 {
     v.get(key)
-        .and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|x| {
+            x.as_i64()
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(0)
 }
 
@@ -780,5 +879,9 @@ fn now_secs() -> u64 {
 }
 
 fn err(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "code": status.as_u16(), "message": message }))).into_response()
+    (
+        status,
+        Json(json!({ "code": status.as_u16(), "message": message })),
+    )
+        .into_response()
 }

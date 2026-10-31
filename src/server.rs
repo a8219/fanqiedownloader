@@ -1,7 +1,7 @@
 //! Application state and server bootstrap.
 
-use std::{collections::HashMap, sync::Arc};
 use axum::Router;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
 use crate::api::routes;

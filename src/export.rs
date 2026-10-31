@@ -38,7 +38,11 @@ pub fn export_html(book_name: &str, chapters: &[ChapterText]) -> Vec<u8> {
     html.push_str(&format!("<h1>{}</h1>", esc(book_name)));
 
     for ch in chapters {
-        html.push_str(&format!("<h2 id=\"{}\">{}</h2>", esc(&ch.title), esc(&ch.title)));
+        html.push_str(&format!(
+            "<h2 id=\"{}\">{}</h2>",
+            esc(&ch.title),
+            esc(&ch.title)
+        ));
         for line in ch.content.lines() {
             if !line.trim().is_empty() {
                 html.push_str(&format!("<p>{}</p>\n", esc(line)));
@@ -104,7 +108,7 @@ fn esc(s: &str) -> String {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
-            '"' => out.push_str("""),
+            '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
             _ => out.push(c),
         }

@@ -367,13 +367,19 @@ static FONT_MAP_RAW: &[(u32, &str)] = &[
 ];
 
 pub static FONT_MAP: LazyLock<HashMap<u32, char>> = LazyLock::new(|| {
-    FONT_MAP_RAW.iter().map(|&(k, s)| (k, s.chars().next().unwrap_or('\u{fffd}'))).collect()
+    FONT_MAP_RAW
+        .iter()
+        .map(|&(k, s)| (k, s.chars().next().unwrap_or('\u{fffd}')))
+        .collect()
 });
 
 /// Decode font-obfuscated text by replacing private-use-area codepoints.
 pub fn decode_font(input: &str) -> String {
-    input.chars().map(|c| {
-        let cp = c as u32;
-        FONT_MAP.get(&cp).copied().unwrap_or(c)
-    }).collect()
+    input
+        .chars()
+        .map(|c| {
+            let cp = c as u32;
+            FONT_MAP.get(&cp).copied().unwrap_or(c)
+        })
+        .collect()
 }

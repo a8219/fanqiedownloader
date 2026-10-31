@@ -72,16 +72,16 @@ pub fn tt_encrypt(data: &[u8]) -> Vec<u8> {
 
 /// AES-128-CBC encrypt with PKCS#7 padding.
 pub fn aes_cbc_encrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut padded = data.to_vec();
-    let pad_len = 16 - (padded.len() % 16);
-    padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
-
     let k: [u8; 16] = key.try_into().unwrap_or([0u8; 16]);
     let v: [u8; 16] = iv.try_into().unwrap_or([0u8; 16]);
 
-    Aes128CbcEnc::new(&k.into(), &v.into())
-        .encrypt_padded_mut::<cipher::block_padding::Pkcs7>(&mut padded)
-        .to_vec()
+    let mut buf = vec![0u8; data.len() + 16];
+    buf[..data.len()].copy_from_slice(data);
+
+    let ct = Aes128CbcEnc::new(&k.into(), &v.into())
+        .encrypt_padded_mut::<cipher::block_padding::Pkcs7>(&mut buf, data.len())
+        .expect("AES-CBC encrypt");
+    ct.to_vec()
 }
 
 /// AES-128-CBC decrypt with PKCS#7 unpadding (tolerant).
@@ -94,30 +94,10 @@ pub fn aes_cbc_decrypt(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
         .decrypt_padded_mut::<cipher::block_padding::Pkcs7>(&mut buf)
     {
         Ok(pt) => pt.to_vec(),
-        Err(_) => {
-            // Fallback: raw decrypt, then best-effort unpad
-            let mut raw = data.to_vec();
-            let n = raw.len() / 16 * 16;
-            raw.truncate(n);
-
-            // Manual CBC decrypt without padding validation
-            let mut out = Vec::with_capacity(n);
-            let mut prev: [u8; 16] = v;
-            let raw_copy = raw.clone();
-            for chunk in raw_copy.chunks(16) {
-                let mut block = [0u8; 16];
-                block.copy_from_slice(chunk);
-                let mut dec = block;
-                // XOR with key-derived stream is not needed here: aes crate handles it.
-                // Use the safe path instead.
-                let _ = &mut dec;
-                out.extend_from_slice(&block);
-                prev = block;
-            }
-            // If real decrypt failed, return as-is (caller handles)
-            let _ = out;
-            buf.truncate(0);
-            data.to_vec()
-        }
+        // Malformed padding: fall back to raw in-place decrypt (no unpad) so the
+        // caller can still work with whatever plaintext we can recover.
+        // Malformed padding or non-block-aligned input: return empty so the
+        // caller falls back to the web reader path.
+        Err(_) => Vec::new(),
     }
 }

@@ -37,7 +37,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/library/:book_id",
             axum::routing::delete(handlers::remove_library),
         )
-        .route("/api/jobs", get(handlers::list_jobs).post(handlers::create_job))
+        .route(
+            "/api/jobs",
+            get(handlers::list_jobs).post(handlers::create_job),
+        )
         .route("/api/jobs/:id", get(handlers::get_job))
         // telegram
         .route("/tg/webhook", post(handlers::tg_webhook))

@@ -51,7 +51,9 @@ pub async fn search_via_proxy(
         .or_else(|| data.get("book_ids"))
         .and_then(|x| x.as_array());
 
-    let Some(list) = list else { return Ok(Vec::new()) };
+    let Some(list) = list else {
+        return Ok(Vec::new());
+    };
 
     let mut out = Vec::with_capacity(list.len());
     for item in list {
@@ -116,7 +118,10 @@ pub async fn search_native(keyword: &str, cfg: &Config) -> anyhow::Result<Vec<Se
 
     let v: serde_json::Value = serde_json::from_str(&body)?;
     if v.get("code").and_then(|c| c.as_i64()) != Some(0) {
-        anyhow::bail!("search code={}", v.get("code").unwrap_or(&serde_json::Value::Null));
+        anyhow::bail!(
+            "search code={}",
+            v.get("code").unwrap_or(&serde_json::Value::Null)
+        );
     }
 
     let Some(items) = v.get("data").and_then(|d| d.as_array()) else {
@@ -153,7 +158,10 @@ pub async fn search_native(keyword: &str, cfg: &Config) -> anyhow::Result<Vec<Se
 }
 
 fn s(v: &serde_json::Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn encode(input: &str) -> String {

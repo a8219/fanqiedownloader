@@ -3,8 +3,8 @@
 //! Derived from fanqie-assistant (GPL-3.0). See THIRD_PARTY_NOTICES.md.
 
 use crate::crypto::device::{ChapterContent, Device, DeviceClient, KeyInfo};
-use crate::server::DeviceCache;
 use crate::font_map;
+use crate::server::DeviceCache;
 
 pub struct ChapterFetcher {
     client: DeviceClient,
@@ -30,7 +30,11 @@ impl ChapterFetcher {
         key: Option<Vec<u8>>,
         keyver: Option<String>,
     ) {
-        self.device = Some(Device { device_id, install_id, device_type });
+        self.device = Some(Device {
+            device_id,
+            install_id,
+            device_type,
+        });
         if let (Some(k), Some(v)) = (key, keyver) {
             self.key = Some(KeyInfo { key: k, keyver: v });
         }
@@ -105,8 +109,8 @@ pub fn strip_tags(html: &str) -> String {
         .replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
-        .replace(""", "\"")
-        .replace("'", "'")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
         .replace("&#39;", "'")
         .replace("&amp;", "&");
 
