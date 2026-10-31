@@ -1,22 +1,34 @@
 // 番茄小说下载器 — Cloudflare Workers 单文件版
-// 依据: a8219/fanqiedownloader src/main.py 的代理 API 契约
-//   /search?key=&tab_type=3 -> data.search_tabs[tab_type=3].data[].book_data[0]
-//   /detail?book_id=        -> data.data.book_name / status
-//   /directory?book_id=     -> data.lists[].title / item_id
-//   /content?tab=小说&item_id= -> data.content
-// 网页回退依据(实测 2026-10): /page/{book_id} 内 window.__INITIAL_STATE__.page
-//   /reader/{item_id} 内 reader.chapterData.content, PUA 字体需 FONT_MAP 解码
-// 字体映射来源: 子集 woff2 dc027189e0ba4cd 与 SourceHanSansCN-Normal v2.002
+//
+// 版权与许可：AGPL-3.0
+// 作者：江南烟雨 (a8219)
+//
+// 本文件包含来自第三方项目的代码，详见 THIRD_PARTY_NOTICES.md。
+//
+// ========== 原创部分 ==========
+// 代理 API 契约: /search /detail /directory /content /download /export
+// 网页解析: window.__INITIAL_STATE__ / LD+JSON / 字体映射(FONT_MAP)
+// 字体映射: 子集 woff2 dc027189e0ba4cd 与 SourceHanSansCN-Normal v2.002
 //   逐字形轮廓 MD5 匹配, 362/362 命中, 三本不同书验证 PUA 全覆盖
-
-// ========== fanqie-assistant 内联（APP 正文接口）==========
+// Telegram Bot / 账号系统 / 配额管理 / Durable Object 下载队列
+// MD3 在线阅读页 /read
+//
+// ========== 第三方部分（fanqie-assistant, GPL-3.0）==========
 // 来源: https://github.com/naiyQAQ/fanqie-assistant
-// 许可: MIT License
-// 用途: 网页版对锁定章节只返回 ~160 字符试读片段，走 APP 端接口拿完整正文
+// 许可: GPL-3.0 (https://github.com/naiyQAQ/fanqie-assistant/blob/main/LICENSE)
+// 用途: APP 正文接口（签名、设备注册、密钥获取、章节解密）
 // 算法: X-Argus(SM3+Simon+Protobuf+AES)、X-Ladon(Speck-128)、AES-CBC 解密
-// 全部为纯 JS/WebCrypto 实现，无 native 依赖，可直接跑在 Workers
-// 设备: 内置匿名设备 + /crypt/registerkey 动态取密钥
-// 缓存: 内存 Map，Worker 冷启动后重新 registerkey（单次 POST，不注册新设备）
+// 说明: 本文件的 __FQ IIFE 包含 fanqie-assistant 的裁剪打包版,
+//   用于在网页版仅提供试读片段时通过 APP 接口获取完整正文。
+//   因 GPL-3.0 传染性, 本文件整体以 AGPL-3.0 分发（AGPL-3.0 兼容 GPL-3.0）。
+//
+// ========== 第三方部分（Vue, MIT）==========
+// 来源: https://github.com/vuejs/core
+// 许可: MIT License
+// 说明: __FQ IIFE 内包含打包的 Vue runtime（reactive/watch/vnode 等），
+//   本 Worker 实际未使用这些 Vue 函数，保留是因为裁剪会破坏打包结构。
+//
+
 const __FQ = (() => {
 globalThis.unsafeWindow = globalThis;
 const _GM = new Map();
