@@ -4885,6 +4885,12 @@ vue/dist/vue.runtime.esm-bundler.js:
   * @license MIT
   **)
 */
+// APP 搜索（一体化，无需代理/签名）— 红烛搜索接口
+// APP 搜索（一体化）— 签名请求 + 红烛直连双路
+// APP 搜索（一体化）— 多路径签名尝试
+// APP 搜索（一体化）— 签名请求
+// APP 搜索（一体化）— 模拟 Chrome 完整请求头
+// APP 搜索（一体化）— 官网搜索 API + Cookie 获取
 return { getFullChapter };
 })();
 
@@ -5227,11 +5233,14 @@ async function hSearch(env, key) {
   if (!key) return json({ code: 400, message: "key required" }, 400);
   const r = await proxyGet(env, "/search", { key, tab_type: 3 });
   if (r.ok) return json({ code: 200, from: r.from, data: r.data });
-  // 网页搜索端点实测 /search?q= 返回 404 (SPA 不服务该路由)，仅当 key 是 book_id 时可用
+  // 番茄的公网搜索接口会触发滑块验证；无上游搜索服务时仅支持书籍 ID 直开。
   if (/^\d{15,}$/.test(key)) {
-    return json({ code: 200, from: "id", data: { book_ids: [key] }, note: "web search unavailable, key treated as book_id" });
+    return json({ code: 200, from: "id", data: { book_ids: [key] }, note: "key treated as book_id" });
   }
-  return json({ code: 501, message: "web search endpoint not available; configure FANQIE_PROXY_API or pass a numeric book_id" }, 501);
+  return json({
+    code: 501,
+    message: "title search requires FANQIE_PROXY_API or an authenticated upstream; paste a book URL or numeric book_id instead",
+  }, 501);
 }
 
 // ---------- 详情 ----------

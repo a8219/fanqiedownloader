@@ -1,0 +1,26 @@
+[package]
+name = "noveldownloader"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-first novel downloader server with a Cloudflare Worker compatible API"
+license = "AGPL-3.0-only"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.7", features = ["macros"] }
+dotenvy = "0.15"
+http = "1.1"
+reqwest = { version = "0.12", default-features = false, features = ["brotli", "charset", "gzip", "http2", "json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

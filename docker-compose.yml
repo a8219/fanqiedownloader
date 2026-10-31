@@ -1,26 +1,13 @@
-version: '3.8'
-
 services:
-  fanqie:
+  noveldownloader:
     build: .
-    container_name: fanqie-novel-downloader
-    ports:
-      - "12930:12930"
-    volumes:
-      # 持久化用户数据
-      - fanqie_data:/app/src/data
-      - fanqie_downloads:/app/src/novel_downloads
+    container_name: noveldownloader
     restart: unless-stopped
-    # 设置资源限制
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-        reservations:
-          memory: 256M
-
-volumes:
-  fanqie_data:
-    name: fanqie_data
-  fanqie_downloads:
-    name: fanqie_downloads
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      WORKER_UPSTREAM_URL: ${WORKER_UPSTREAM_URL:-https://fanqie-downloader.3942369144a.workers.dev}
+      RUST_LOG: ${RUST_LOG:-info,tower_http=info}
