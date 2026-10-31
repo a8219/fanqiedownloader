@@ -9,5 +9,5 @@ services:
       - "8080:8080"
     environment:
       BIND_ADDR: 0.0.0.0:8080
-      WORKER_UPSTREAM_URL: ${WORKER_UPSTREAM_URL:-https://fanqie-downloader.3942369144a.workers.dev}
       RUST_LOG: ${RUST_LOG:-info,tower_http=info}
+      FANQIE_ONLINE_READ: "1"
