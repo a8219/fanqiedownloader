@@ -1,108 +1,117 @@
-//! Chapter content fetching and decryption pipeline.
+//! Chapter fetch pipeline: device check -> key check -> decrypt -> font decode.
+//!
+//! Derived from fanqie-assistant (GPL-3.0). See THIRD_PARTY_NOTICES.md.
 
-use crate::crypto::device::{DeviceClient, Device, KeyInfo, ChapterContent};
+use crate::crypto::device::{ChapterContent, Device, DeviceClient, KeyInfo};
+use crate::server::DeviceCache;
 use crate::font_map;
 
 pub struct ChapterFetcher {
     client: DeviceClient,
     device: Option<Device>,
-    key_info: Option<KeyInfo>,
+    key: Option<KeyInfo>,
 }
 
 impl ChapterFetcher {
-    pub fn new() -> Self {
+    pub fn new(http: reqwest::Client) -> Self {
         Self {
-            client: DeviceClient::new(),
+            client: DeviceClient::new(http),
             device: None,
-            key_info: None,
+            key: None,
         }
     }
 
-    /// Ensure device is registered and key is obtained.
-    async fn ensure_device(&mut self) -> anyhow::Result<(&Device, &KeyInfo)> {
+    /// Restore a previously registered device + key (warm path).
+    pub fn restore(
+        &mut self,
+        device_id: String,
+        install_id: String,
+        device_type: String,
+        key: Option<Vec<u8>>,
+        keyver: Option<String>,
+    ) {
+        self.device = Some(Device { device_id, install_id, device_type });
+        if let (Some(k), Some(v)) = (key, keyver) {
+            self.key = Some(KeyInfo { key: k, keyver: v });
+        }
+    }
+
+    /// Snapshot the current device/key for caching.
+    pub fn export(&self) -> Option<DeviceCache> {
+        let d = self.device.as_ref()?;
+        Some(DeviceCache {
+            device_id: d.device_id.clone(),
+            install_id: d.install_id.clone(),
+            device_type: d.device_type.clone(),
+            key: self.key.as_ref().map(|k| k.key.clone()),
+            keyver: self.key.as_ref().map(|k| k.keyver.clone()),
+        })
+    }
+
+    async fn ensure_device(&mut self) -> anyhow::Result<()> {
         if self.device.is_none() {
-            let dev = self.client.register_device().await?;
-            tracing::info!("Device registered: {} / {}", dev.device_id, dev.install_id);
-            self.device = Some(dev);
+            let d = self.client.register_device().await?;
+            tracing::info!(device_id = %d.device_id, "device registered");
+            self.device = Some(d);
         }
-        if self.key_info.is_none() {
-            let dev = self.device.as_ref().unwrap();
-            let key = self.client.register_key(dev).await?;
-            tracing::info!("Key registered: ver={}", key.keyver);
-            self.key_info = Some(key);
-        }
-        Ok((self.device.as_ref().unwrap(), self.key_info.as_ref().unwrap()))
+        Ok(())
     }
 
-    /// Get a full chapter by item_id, with font decoding and tag stripping.
+    async fn ensure_key(&mut self) -> anyhow::Result<()> {
+        if self.key.is_none() {
+            let device = self
+                .device
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("device not ready"))?;
+            let k = self.client.register_key(device).await?;
+            tracing::info!(keyver = %k.keyver, "chapter key registered");
+            self.key = Some(k);
+        }
+        Ok(())
+    }
+
+    /// Full chapter: decrypt, decode the custom font, strip tags.
     pub async fn get_full_chapter(&mut self, item_id: &str) -> anyhow::Result<ChapterContent> {
-        let (device, key_info) = self.ensure_device().await?;
-        let mut ch = self.client.get_chapter(device, key_info, item_id).await?;
-        // Decode font obfuscation
-        ch.content = font_map::decode_font(&ch.content);
-        // Strip HTML tags
-        ch.content = strip_tags(&ch.content);
+        self.ensure_device().await?;
+        self.ensure_key().await?;
+
+        let device = self.device.as_ref().expect("device");
+        let key = self.key.as_ref().expect("key");
+
+        let mut ch = self.client.fetch_chapter(device, key, item_id).await?;
+        ch.content = font_map::decode_font(&strip_tags(&ch.content));
         Ok(ch)
     }
 }
 
-/// Strip HTML tags and decode entities.
+/// Remove markup and normalise whitespace.
 pub fn strip_tags(html: &str) -> String {
-    let mut s = html.to_string();
-    // Remove script/style blocks
-    s = regex_like_replace(&s, "<script[^>]*>[\\s\\S]*?</script>", "");
-    s = regex_like_replace(&s, "<style[^>]*>[\\s\\S]*?</style>", "");
-    // Convert breaks to newlines
-    s = s.replace("<br />", "\n").replace("<br>", "\n").replace("<br/>", "\n");
-    s = s.replace("</p>", "\n");
-    // Strip remaining tags
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
-    for c in s.chars() {
-        if c == '<' { in_tag = true; }
-        if !in_tag { out.push(c); }
-        if c == '>' { in_tag = false; }
-    }
-    // Decode entities
-    out = out.replace("&nbsp;", " ")
-             .replace("&amp;", "&")
-             .replace("&lt;", "<")
-             .replace("&gt;", ">")
-             .replace(""", "\"")
-             .replace("'", "'");
-    // Collapse excessive newlines
-    while out.contains("\n\n\n") {
-        out = out.replace("\n\n\n", "\n\n");
-    }
-    out.trim().to_string()
-}
 
-/// Simple regex-like replace (literal string match with wildcards).
-fn regex_like_replace(input: &str, _pattern: &str, replacement: &str) -> String {
-    // Simplified: just remove script/style blocks by finding tags
-    // For production, use the `regex` crate.
-    let mut result = String::with_capacity(input.len());
-    let lower = input.to_lowercase();
-    let mut i = 0;
-    while i < input.len() {
-        if lower[i..].starts_with("<script") {
-            if let Some(end) = lower[i..].find("</script>") {
-                i += end + 9;
-                continue;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push('\n');
             }
-        }
-        if lower[i..].starts_with("<style") {
-            if let Some(end) = lower[i..].find("</style>") {
-                i += end + 8;
-                continue;
-            }
-        }
-        if let Some(c) = input[i..].chars().next() {
-            result.push(c);
-            i += c.len_utf8();
-        } else {
-            break;
+            _ if !in_tag => out.push(ch),
+            _ => {}
         }
     }
-    result
+
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace(""", "\"")
+        .replace("'", "'")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+
+    let mut lines: Vec<&str> = decoded.lines().map(|l| l.trim()).collect();
+    lines.retain(|l| !l.is_empty());
+
+    lines.join("\n")
 }

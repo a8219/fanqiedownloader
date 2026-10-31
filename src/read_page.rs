@@ -1,3 +1,3 @@
-//! MD3 online reading page (embedded HTML).
+//! Embedded MD3 reading page.
 
 pub const READ_PAGE_HTML: &str = include_str!("../static/read.html");

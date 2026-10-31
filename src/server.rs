@@ -3,10 +3,11 @@
 use std::{collections::HashMap, sync::Arc};
 use axum::Router;
 use tokio::sync::RwLock;
+
 use crate::api::routes;
 use crate::config::Config;
 
-/// Cache for a successfully registered device (shared across requests).
+/// Registered device + chapter key, cached process-wide.
 #[derive(Clone, Debug)]
 pub struct DeviceCache {
     pub device_id: String,
@@ -20,11 +21,10 @@ pub struct DeviceCache {
 pub struct AppState {
     pub config: Config,
     pub http: reqwest::Client,
+    pub upstream_url: Option<String>,
     pub library: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     pub jobs: Arc<RwLock<HashMap<String, serde_json::Value>>>,
-    /// Shared device/key cache so we don't re-register on every chapter fetch.
     pub device: Arc<RwLock<Option<DeviceCache>>>,
-    /// Per-book chapter-count records for update detection.
     pub records: Arc<RwLock<HashMap<String, usize>>>,
 }
 
@@ -37,9 +37,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .pool_max_idle_per_host(32)
         .build()?;
 
+    let upstream_url = config.upstream_url.clone();
+
     let state = AppState {
-        config: config.clone(),
+        config,
         http,
+        upstream_url,
         library: Arc::new(RwLock::new(HashMap::new())),
         jobs: Arc::new(RwLock::new(HashMap::new())),
         device: Arc::new(RwLock::new(None)),
@@ -47,9 +50,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     };
 
     let app: Router = routes::build_router(state);
-    let addr: std::net::SocketAddr = config.bind_addr.parse()?;
+    let addr: std::net::SocketAddr = state_addr()?;
     tracing::info!(%addr, "NovelDownloader listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn state_addr() -> anyhow::Result<std::net::SocketAddr> {
+    let raw = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    Ok(raw.parse()?)
 }

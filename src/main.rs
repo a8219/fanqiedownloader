@@ -1,10 +1,12 @@
-use noveldownloader::{Config, server};
+use noveldownloader::{server, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info,tower_http=info".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,tower_http=info".into()),
+        )
         .init();
 
     let config = Config::from_env();
@@ -13,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
         cookie = config.fanqie_cookie.is_some(),
         proxy = config.proxy_api.is_some(),
         tg = config.tg_bot_token.is_some(),
+        upstream = config.upstream_url.is_some(),
         "NovelDownloader starting"
     );
 

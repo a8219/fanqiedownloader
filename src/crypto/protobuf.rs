@@ -1,5 +1,6 @@
-//! Minimal protobuf writer for building Argus/Ladon payloads.
+//! Minimal protobuf writer (varint + length-delimited only).
 
+#[derive(Default)]
 pub struct ProtobufWriter {
     buf: Vec<u8>,
 }
@@ -9,33 +10,26 @@ impl ProtobufWriter {
         Self { buf: Vec::with_capacity(256) }
     }
 
-    pub fn write_varint(&mut self, field: u32, value: u64) {
-        self.buf.push((field << 3) | 0);
-        let mut v = value;
-        while v >= 0x80 {
-            self.buf.push(((v & 0x7F) | 0x80) as u8);
-            v >>= 7;
-        }
-        self.buf.push(v as u8);
+    pub fn varint(&mut self, field: u32, value: u64) -> &mut Self {
+        self.buf.push((field << 3) as u8);
+        self.raw_varint(value);
+        self
     }
 
-    pub fn write_string(&mut self, field: u32, s: &str) {
-        self.buf.push((field << 3) | 2);
-        let bytes = s.as_bytes();
-        self.write_len(bytes.len() as u64);
-        self.buf.extend_from_slice(bytes);
-    }
-
-    pub fn write_bytes(&mut self, field: u32, data: &[u8]) {
-        self.buf.push((field << 3) | 2);
-        self.write_len(data.len() as u64);
+    pub fn bytes(&mut self, field: u32, data: &[u8]) -> &mut Self {
+        self.buf.push(((field << 3) | 2) as u8);
+        self.raw_varint(data.len() as u64);
         self.buf.extend_from_slice(data);
+        self
     }
 
-    fn write_len(&mut self, len: u64) {
-        let mut v = len;
+    pub fn string(&mut self, field: u32, s: &str) -> &mut Self {
+        self.bytes(field, s.as_bytes())
+    }
+
+    fn raw_varint(&mut self, mut v: u64) {
         while v >= 0x80 {
-            self.buf.push(((v & 0x7F) | 0x80) as u8);
+            self.buf.push(((v & 0x7f) | 0x80) as u8);
             v >>= 7;
         }
         self.buf.push(v as u8);
@@ -43,5 +37,13 @@ impl ProtobufWriter {
 
     pub fn finish(self) -> Vec<u8> {
         self.buf
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 }

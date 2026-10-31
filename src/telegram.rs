@@ -1,37 +1,37 @@
-//! Telegram Bot: messaging, document upload, webhook registration.
+//! Telegram Bot client.
 
 use crate::config::Config;
 use serde_json::json;
 
 #[derive(Clone)]
 pub struct TelegramBot {
-    pub token: String,
-    pub http: reqwest::Client,
+    token: String,
+    http: reqwest::Client,
 }
 
 impl TelegramBot {
-    pub fn from_config(config: &Config) -> Option<Self> {
-        config.tg_bot_token.as_ref().map(|t| Self::from_token(t.clone()))
+    pub fn from_config(cfg: &Config) -> Option<Self> {
+        cfg.tg_bot_token.clone().map(Self::from_token)
     }
 
     pub fn from_token(token: String) -> Self {
         Self {
             token,
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .expect("tg client"),
+                .expect("telegram client"),
         }
     }
 
-    fn api(&self, method: &str) -> String {
+    fn endpoint(&self, method: &str) -> String {
         format!("https://api.telegram.org/bot{}/{}", self.token, method)
     }
 
     pub async fn send_message(&self, chat_id: &str, text: &str) -> anyhow::Result<()> {
         let resp = self
             .http
-            .post(self.api("sendMessage"))
+            .post(self.endpoint("sendMessage"))
             .json(&json!({
                 "chat_id": chat_id,
                 "text": text,
@@ -39,8 +39,11 @@ impl TelegramBot {
             }))
             .send()
             .await?;
+
         if !resp.status().is_success() {
-            tracing::warn!("tg sendMessage {}: {}", resp.status(), resp.text().await.unwrap_or_default());
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendMessage {status}: {body}");
         }
         Ok(())
     }
@@ -54,28 +57,59 @@ impl TelegramBot {
     ) -> anyhow::Result<()> {
         let part = reqwest::multipart::Part::bytes(data)
             .file_name(filename.to_string())
-            .mime_str("text/plain")?;
+            .mime_str("text/plain; charset=utf-8")?;
+
         let form = reqwest::multipart::Form::new()
             .text("chat_id", chat_id.to_string())
             .text("caption", caption.to_string())
             .part("document", part);
-        let resp = self.http.post(self.api("sendDocument")).multipart(form).send().await?;
+
+        let resp = self
+            .http
+            .post(self.endpoint("sendDocument"))
+            .multipart(form)
+            .send()
+            .await?;
+
         if !resp.status().is_success() {
-            tracing::warn!("tg sendDocument {}: {}", resp.status(), resp.text().await.unwrap_or_default());
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendDocument {status}: {body}");
         }
         Ok(())
     }
 
-    pub async fn set_webhook(&self, url: &str) -> anyhow::Result<()> {
+    pub async fn set_webhook(&self, url: &str, secret: Option<&str>) -> anyhow::Result<()> {
+        let mut payload = json!({
+            "url": url,
+            "allowed_updates": ["message", "channel_post", "callback_query"],
+            "drop_pending_updates": true,
+        });
+        if let Some(secret) = secret {
+            payload["secret_token"] = json!(secret);
+        }
+
         let resp = self
             .http
-            .post(self.api("setWebhook"))
-            .json(&json!({ "url": url, "allowed_updates": ["message", "callback_query"] }))
+            .post(self.endpoint("setWebhook"))
+            .json(&payload)
             .send()
             .await?;
+
         if !resp.status().is_success() {
-            anyhow::bail!("setWebhook failed: {}", resp.status());
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("setWebhook {status}: {body}");
         }
+        Ok(())
+    }
+
+    pub async fn delete_webhook(&self) -> anyhow::Result<()> {
+        self.http
+            .post(self.endpoint("deleteWebhook"))
+            .json(&json!({ "drop_pending_updates": true }))
+            .send()
+            .await?;
         Ok(())
     }
 }
