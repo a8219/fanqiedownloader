@@ -216,7 +216,9 @@ async fn forward_upstream(
     req = req.header(header::ACCEPT, "application/json, text/plain, */*");
     if !body.is_empty() { req = req.body(body); }
     for name in [header::CONTENT_TYPE, header::AUTHORIZATION] {
-        if let Some(value) = source_headers.get(&name) { req = req.header(name, value); }
+        if let Some(value) = source_headers.get(&name) {
+            req = req.header(name, value.clone());
+        }
     }
 
     match req.send().await {
