@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::crypto::chapter::ChapterFetcher;
-use crate::export::{export_html, export_txt, export_zip, ExportChapter};
+use crate::export::{export_html, export_txt, export_zip, ChapterText};
 use crate::server::AppState;
 use crate::telegram::TelegramBot;
 
@@ -498,11 +498,6 @@ pub async fn tg_setup(State(state): State<AppState>) -> Response {
 }
 
 // ================= helpers =================
-
-pub struct ChapterText {
-    pub title: String,
-    pub content: String,
-}
 
 struct FetchedChapter {
     title: String,

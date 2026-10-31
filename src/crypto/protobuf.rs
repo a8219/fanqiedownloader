@@ -1,5 +1,7 @@
 //! Minimal protobuf writer (varint + length-delimited only).
 
+#![allow(dead_code)]
+
 #[derive(Default)]
 pub struct ProtobufWriter {
     buf: Vec<u8>,

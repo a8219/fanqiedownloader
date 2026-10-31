@@ -6,9 +6,7 @@ use base64::Engine;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::sign::{
-    sign_request, APP_UA, AID, READING_BASE, REGISTER_URL, SDK_VERSION_INT, SHARED_KEY,
-};
+use crate::crypto::sign::{sign_request, AID, APP_UA, READING_BASE, REGISTER_URL, SHARED_KEY};
 use crate::crypto::ttencrypt;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

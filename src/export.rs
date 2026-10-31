@@ -2,7 +2,12 @@
 
 use std::io::{Cursor, Write};
 
-use crate::api::handlers::ChapterText;
+/// A resolved chapter: title + plain-text body.
+#[derive(Debug, Clone)]
+pub struct ChapterText {
+    pub title: String,
+    pub content: String,
+}
 
 /// Plain text with UTF-8 BOM (Windows-friendly).
 pub fn export_txt(book_name: &str, chapters: &[ChapterText]) -> Vec<u8> {

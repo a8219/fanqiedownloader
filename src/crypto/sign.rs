@@ -8,6 +8,7 @@ use rand::Rng;
 use crate::crypto::md5;
 
 pub const AID: &str = "1967";
+#[allow(dead_code)]
 pub const LICENSE_ID: &str = "1611921764";
 pub const SDK_VERSION_INT: u32 = 134_744_640;
 pub const CALL_TYPE: u32 = 738;
